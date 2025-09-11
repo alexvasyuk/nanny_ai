@@ -63,10 +63,10 @@ def main():
         context.set_default_timeout(args.timeout)
         page = context.new_page()
 
-        console.rule("[bold]Open homepage")
+        console.rule("[bold]Open page")
         page.goto(base_url, wait_until="domcontentloaded")
 
-        # Optional: accept cookies banner
+        # Optional cookie banner
         if SELECTORS.get("cookie.accept"):
             try:
                 page.click(SELECTORS["cookie.accept"], timeout=3000)
@@ -74,14 +74,15 @@ def main():
             except PlaywrightTimeoutError:
                 pass
 
-        # Click login
-        login_btn = require_selector("nav.login_button")
-        try:
+        # Optional: click Login button only if selector provided
+        login_btn = SELECTORS.get("nav.login_button")
+        if login_btn and login_btn != "REPLACE_ME":
             console.rule("[bold]Click Login")
-            page.click(login_btn)
-        except PlaywrightTimeoutError:
-            console.print("[red]Could not click login button. Check the selector.[/red]")
-            sys.exit(3)
+            try:
+                page.click(login_btn)
+            except PlaywrightTimeoutError:
+                console.print("[yellow]Login button not clickable; continuing (already on login page?).[/yellow]")
+
 
         # Fill credentials
         uname_sel = require_selector("login.username")
