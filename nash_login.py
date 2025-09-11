@@ -122,14 +122,11 @@ def main():
         pwd_input = first_visible(page, pwd_candidates)
         pwd_input.fill(pw)
 
-        # Try robust submit button locators
-        submit_candidates = [
-            page.get_by_role("button", name=re.compile(r"войти|логин|sign in|submit", re.I)),
-            page.locator('button[type="submit"]'),
-            page.locator('input[type="submit"]'),
-        ]
-        submit_btn = first_visible(page, submit_candidates)
+        # Submit (unique, stable locator)
+        submit_btn = page.locator('[data-test-id="email-password-submit-button"]').first
+        submit_btn.wait_for(state="visible", timeout=8000)
         submit_btn.click()
+
 
         # Wait for post-login marker
         marker = require_selector("postlogin.marker")
