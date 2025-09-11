@@ -8,7 +8,8 @@ from playwright.sync_api import sync_playwright
 from extractors import (
     open_first_profile_from_serp, 
     extract_name_from_profile, 
-    extract_age_from_profile
+    extract_age_from_profile,
+    extract_experience_from_profile,
 )
 from io_csv import append_row
 
@@ -46,6 +47,7 @@ def main():
         # Extract fields (for now: name)
         name = extract_name_from_profile(profile_page)
         age = extract_age_from_profile(profile_page)
+        experience_years = extract_experience_from_profile(profile_page) 
 
         # Build a row and write to CSV
         row = {
@@ -53,6 +55,7 @@ def main():
             "profile_url": profile_page.url,
             "name": name,
             "age": age,
+            "experience_years": experience_years, 
         }
         append_row(row, OUTPUT_CSV)
         print(f"[INFO] Wrote row to {OUTPUT_CSV}")

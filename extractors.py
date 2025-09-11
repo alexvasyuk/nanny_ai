@@ -118,3 +118,38 @@ def extract_age_from_profile(page, timeout=3000) -> Optional[int]:
         pass
 
     return None
+
+def extract_experience_from_profile(page, timeout=3000) -> Optional[int]:
+    """
+    Years of experience (Опыт).
+    1) Parse embedded JSON: "experienceAge": <int>
+    2) Fallback: read the visible stat 'Лет опыта'
+    Returns int or None.
+    """
+    html = page.content()
+
+    # 1) JSON field
+    m = re.search(r'"experienceAge"\s*:\s*(\d+)', html)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+
+    # 2) Visible block: ... <div class="catalog-stats__value">12</div> <div class="catalog-stats__type">Лет опыта</div>
+    try:
+        xp_value_loc = page.locator(
+            "xpath=//div[contains(@class,'catalog-stats__item')]"
+            "[.//div[contains(@class,'catalog-stats__type')][normalize-space()='Лет опыта']]"
+            "//div[contains(@class,'catalog-stats__value')][1]"
+        ).first
+        xp_value_loc.wait_for(state="visible", timeout=timeout)
+        txt = xp_value_loc.inner_text().strip()
+        # keep only digits
+        digits = re.findall(r"\d+", txt)
+        if digits:
+            return int(digits[0])
+    except Exception:
+        pass
+
+    return None
