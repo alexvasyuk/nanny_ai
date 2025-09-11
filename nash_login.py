@@ -14,6 +14,19 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 console = Console()
 
+# ADD near the top:
+import re
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+def first_visible(page, candidates, timeout=8000):
+    for loc in candidates:
+        try:
+            loc.wait_for(state="visible", timeout=timeout)
+            return loc
+        except PlaywrightTimeoutError:
+            continue
+    raise PlaywrightTimeoutError("No candidate locator became visible in time.")
+
 # 👉 Replace these with actual selectors from the site (use Chrome DevTools → Copy selector)
 SELECTORS = {
     "cookie.accept": None,           # e.g., '#cookie-accept' (optional)
@@ -85,14 +98,38 @@ def main():
 
 
         # Fill credentials
-        uname_sel = require_selector("login.username")
-        pass_sel  = require_selector("login.password")
-        submit_sel= require_selector("login.submit")
+        console.rule("[bold]Fill credentials (robust locators)")
 
-        console.rule("[bold]Fill credentials")
-        page.fill(uname_sel, user)
-        page.fill(pass_sel, pw)
-        page.click(submit_sel)
+        # Try robust username/email locators
+        email_candidates = [
+            page.get_by_placeholder(re.compile(r"e-?mail|email|почта", re.I)),
+            page.get_by_label(re.compile(r"e-?mail|email|почта|электрон", re.I)),
+            page.locator('input[type="email"]'),
+            page.locator('input[name="email"]'),
+            page.locator('input[name*="email" i]'),
+            page.locator('input[type="text"]'),
+        ]
+        email_input = first_visible(page, email_candidates)
+        email_input.fill(user)
+
+        # Try robust password locators
+        pwd_candidates = [
+            page.get_by_placeholder(re.compile(r"парол", re.I)),   # "пароль"
+            page.get_by_label(re.compile(r"парол", re.I)),
+            page.locator('input[type="password"]'),
+            page.locator('input[name*="pass" i]'),
+        ]
+        pwd_input = first_visible(page, pwd_candidates)
+        pwd_input.fill(pw)
+
+        # Try robust submit button locators
+        submit_candidates = [
+            page.get_by_role("button", name=re.compile(r"войти|логин|sign in|submit", re.I)),
+            page.locator('button[type="submit"]'),
+            page.locator('input[type="submit"]'),
+        ]
+        submit_btn = first_visible(page, submit_candidates)
+        submit_btn.click()
 
         # Wait for post-login marker
         marker = require_selector("postlogin.marker")
