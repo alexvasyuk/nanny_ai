@@ -1,6 +1,8 @@
 # extractors.py
 import re
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from datetime import date, datetime, timezone
+from typing import Optional
 
 PROFILE_URL_RE = re.compile(r"/nyanya/moscow/\d+$")
 
@@ -76,5 +78,43 @@ def extract_name_from_profile(page, timeout=5000):
     m = re.search(r'"name"\s*:\s*"([^"]+)"', html)
     if m:
         return m.group(1)
+
+    return None
+
+def _compute_age(birth: date, today: Optional[date] = None) -> int:
+    if today is None:
+        today = date.today()
+    years = today.year - birth.year
+    if (today.month, today.day) < (birth.month, birth.day):
+        years -= 1
+    return years
+
+def extract_age_from_profile(page, timeout=3000) -> Optional[int]:
+    """
+    Extract age from the profile page.
+    """
+    html = page.content()
+
+    # 1) Try to parse "birthDate":"..."
+    m = re.search(r'"birthDate"\s*:\s*"([^"]+)"', html)
+    if m:
+        iso = m.group(1)
+        try:
+            if iso.endswith("Z"):
+                dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            else:
+                dt = datetime.fromisoformat(iso)
+            return _compute_age(dt.date())
+        except Exception:
+            pass
+
+    # 2) Fallback: look for "XX лет"
+    try:
+        body_text = page.inner_text("body", timeout=timeout)
+        m2 = re.search(r'(\d{1,3})\s*лет', body_text)
+        if m2:
+            return int(m2.group(1))
+    except Exception:
+        pass
 
     return None

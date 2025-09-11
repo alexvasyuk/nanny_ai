@@ -5,7 +5,11 @@ from pathlib import Path
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
-from extractors import open_first_profile_from_serp, extract_name_from_profile
+from extractors import (
+    open_first_profile_from_serp, 
+    extract_name_from_profile, 
+    extract_age_from_profile
+)
 from io_csv import append_row
 
 # Reuse session saved by nash_login.py
@@ -41,13 +45,14 @@ def main():
 
         # Extract fields (for now: name)
         name = extract_name_from_profile(profile_page)
-        print("Имя:", name)
+        age = extract_age_from_profile(profile_page)
 
         # Build a row and write to CSV
         row = {
             "scraped_at": datetime.now().isoformat(timespec="seconds"),
             "profile_url": profile_page.url,
             "name": name,
+            "age": age,
         }
         append_row(row, OUTPUT_CSV)
         print(f"[INFO] Wrote row to {OUTPUT_CSV}")
