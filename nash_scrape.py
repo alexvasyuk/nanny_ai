@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+import time
+import argparse
 from urllib.parse import urlparse
 from typing import Any, Iterable, Optional 
 from pathlib import Path
@@ -10,6 +11,7 @@ from scorer import score_with_chatgpt
 from io_csv import append_row
 from datetime import datetime, timedelta
 import re
+from gsheets import upsert_nannies, append_run_row
 
 from extractors import (
     get_serp_cards,
@@ -117,6 +119,7 @@ def scrape_open_profile(page, jd_text: str) -> dict:
 
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "profile_id": profile_id_from_url(url_now),
         "url": url_now,
         "name": name,
         "age": age,
@@ -134,7 +137,8 @@ def scrape_recent_on_current_serp(
     *,
     cutoff_hours: int = 48,
     cap: Optional[int] = None,
-    seen_ids: Optional[set] = None,  # <-- NEW
+    seen_ids: Optional[set] = None,  
+    sink: Optional[list] = None,    
 ) -> int:
     """
     Single-SERP-page workflow:
@@ -145,6 +149,7 @@ def scrape_recent_on_current_serp(
     cutoff_dt = datetime.now().astimezone() - timedelta(hours=cutoff_hours)
     seen_ids = seen_ids if seen_ids is not None else set()
     written = 0
+    sink = sink if sink is not None else []
 
     # ---- 1) COLLECT (no navigation) -----------------------------------------
     cards = get_serp_cards(page)
@@ -192,7 +197,7 @@ def scrape_recent_on_current_serp(
         row["last_active_raw"] = c["last_active_raw"]
         row["last_active_at"]  = c["last_active_at"].isoformat() if c["last_active_at"] else None
 
-        append_row(row, OUTPUT_CSV)
+        sink.append(row)
         if c["pid"]:
             seen_ids.add(c["pid"])
         written += 1
@@ -213,16 +218,23 @@ def scrape_recent_across_pages(
     *,
     cutoff_hours: int = 48,
     cap_per_page: Optional[int] = None,
-    max_pages: Optional[int] = None
+    max_pages: Optional[int] = None,
+    seen_ids: Optional[set] = None,  
 ) -> int:
     total_written = 0
     page_index = 1
     seen_ids: set[str] = set()   # <-- shared across pages
+    rows_accum: list[dict] = []     
 
     while True:
         print(f"\n[PAGE {page_index}] --------", flush=True)
         written_this_page = scrape_recent_on_current_serp(
-            page, jd_text, cutoff_hours=cutoff_hours, cap=cap_per_page, seen_ids=seen_ids
+            page, 
+            jd_text, 
+            cutoff_hours=cutoff_hours, 
+            cap=cap_per_page, 
+            seen_ids=seen_ids,
+            sink=rows_accum,
         )
         total_written += written_this_page
 
@@ -243,11 +255,22 @@ def scrape_recent_across_pages(
         page.wait_for_timeout(350)
         page_index += 1
 
-    return total_written
+    return total_written, rows_accum
 
 
 
 def main():
+    t0 = time.time()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sa-json", required=True, help="Path to Google service account JSON")
+    parser.add_argument("--sheet-id", required=True, help="Google Sheets spreadsheet ID")
+    parser.add_argument("--since-hours", type=int, default=48)
+    parser.add_argument("--max-pages", type=int, default=None)
+    parser.add_argument("--cap-per-page", type=int, default=None)
+    parser.add_argument("--new-only", action="store_true", help="Insert only new; don't update existing")
+    args = parser.parse_args()
+
     if not STORAGE_STATE_PATH.exists():
         print(f"[ERROR] Storage state not found at {STORAGE_STATE_PATH}. Run nash_login.py first.")
         return 1
@@ -266,19 +289,42 @@ def main():
         print(f"[INFO] Opening SERP: {SERP_URL}")
         page.goto(SERP_URL, wait_until="domcontentloaded")
 
-        rows_written = scrape_recent_across_pages(
+        total_written, rows_accum = scrape_recent_across_pages(
             page,
             jd_text,
-            cutoff_hours=48,
-            cap_per_page=None,   # e.g., set 5 while testing
-            max_pages=None       # e.g., set 3 while testing
+            cutoff_hours=args.since_hours,
+            cap_per_page=args.cap_per_page,
+            max_pages=args.max_pages,
         )
-        print(f"[INFO] Wrote {rows_written} rows to {OUTPUT_CSV}")
+        pages_scanned = "N/A" if args.max_pages is None else args.max_pages  # set a real count if you tracked it
 
-        # (Optional) Keep window open briefly for visual check
-        page.wait_for_timeout(2000)
+        # ---- UPSERT to Google Sheets ----
+        new_count, upd_count = upsert_nannies(
+            sa_json=args.sa_json,
+            spreadsheet_id=args.sheet_id,
+            scraped_rows=rows_accum,
+            new_only=args.new_only,
+        )
+        print(f"[SHEETS] inserted={new_count} updated={upd_count}")
 
-        context.close()
+        # ---- Audit (optional) ----
+        run_info = {
+            "run_id_iso": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "serp_url": SERP_URL,
+            "cutoff_hours": args.since_hours,
+            "pages_scanned": pages_scanned,
+            "candidates_scanned": len(rows_accum),
+            "new_inserted": new_count,
+            "updated_existing": upd_count,
+            "duration_sec": round(time.time() - t0, 1),
+        }
+        try:
+            append_run_row(args.sa_json, args.sheet_id, run_info)
+        except Exception as e:
+            print(f"[WARN] could not append Runs row: {e}")
+
+        # keep session if you like, then close browser
+        context.storage_state(path=STORAGE_STATE_PATH)
         browser.close()
 
     return 0
