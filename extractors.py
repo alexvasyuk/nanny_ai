@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import re
 from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional, Tuple, List
+import time
 
 PROFILE_URL_RE = re.compile(r".*/nyanya/[^/]+/\d+/?$")
 NBSP = u"\u00A0"
@@ -20,11 +21,32 @@ _RU_MONTHS = {
 
 # Regexes for relative times
 _RE_REL = re.compile(
-    r"(?P<num>\d+)\s*(?P<unit>минут(?:а|ы)?|час(?:а|ов)?|дн(?:ей|я|eй|ё?н[ья])?)\s*назад",
+    r"(?:(?P<num>\d+)\s*)?"
+    r"(?P<unit>"
+    r"минут(?:у|а|ы)?|"     # минуту / минута / минуты
+    r"час(?:а|ов)?|"        # час / часа / часов
+    r"д(?:ень|ня|ней)|"     # день / дня / дней
+    r"сут(?:ки|ок)"         # сутки / суток
+    r")\s*назад",
     re.IGNORECASE
 )
 
 _RE_TIME = re.compile(r"(?P<h>\d{1,2}):(?P<m>\d{2})")
+
+# --- SERP card → absolute URL -------------------------------------------------
+BASE = "https://nashanyanya.ru"
+
+def card_primary_url(card) -> str:
+    """
+    Return the absolute profile URL for a SERP card, or "" if not found.
+    Works for any city: /nyanya/<city>/<id>.
+    """
+    a = card.locator("a[href^='/nyanya/']").first
+    if a.count() == 0:
+        return ""
+    href = a.get_attribute("href") or ""
+    return href if href.startswith("http") else f"{BASE}{href}"
+
 
 # Examples the site shows (varies):
 # "Была на сайте: Сейчас"
@@ -78,14 +100,17 @@ def parse_last_active_ru(raw: str, *, now: Optional[datetime] = None) -> Optiona
     # 4) Relative: "<N> ... назад"
     mrel = _RE_REL.search(text)
     if mrel:
-        num = int(mrel.group("num"))
+        num_str = mrel.group("num")
+        num = int(num_str) if num_str else 1  # default to 1 when number omitted
         unit = mrel.group("unit")
+        unit = unit.lower()
+
         if unit.startswith("минут"):
             return now - timedelta(minutes=num)
         if unit.startswith("час"):
             return now - timedelta(hours=num)
-        # days (дней/дня/дней/днeй etc)
-        return now - timedelta(days=num)
+        if unit.startswith("сут") or unit.startswith("д"):
+            return now - timedelta(days=num)
 
     # 5) Absolute: "DD <месяц> [YYYY] [в HH:MM]"
     #    e.g., "14 февраля 2025 в 09:30", "3 марта в 8:00", "7 июня"
@@ -175,6 +200,54 @@ def get_serp_cards(page: Page, timeout: int = 15000) -> Locator:
     cards = page.locator(CARD_SELECTOR)
     cards.first.wait_for(state="visible", timeout=timeout)
     return cards
+
+def go_to_next_serp_page(page: Page, timeout: int = 10000) -> bool:
+    """
+    Click the 'Next' paginator button and wait until the SERP actually changes.
+    Returns True if navigation succeeded, False if there is no next page or it didn't change.
+
+    We detect change by watching the primary URL of the first card.
+    """
+    # Snapshot the first card's URL to detect change
+    try:
+        cards = get_serp_cards(page)
+        before_url = card_primary_url(cards.first)
+    except Exception:
+        before_url = ""
+
+    # Find the Next button (enabled)
+    next_btn = page.locator("button.pagination__nav_next").first
+    if next_btn.count() == 0:
+        return False
+    try:
+        # Some Angular Material buttons can be disabled via attribute/aria
+        if next_btn.get_attribute("disabled") is not None:
+            return False
+        aria = (next_btn.get_attribute("aria-disabled") or "").lower()
+        if aria in ("true", "1"):
+            return False
+    except Exception:
+        pass
+
+    try:
+        next_btn.scroll_into_view_if_needed()
+        next_btn.click()
+    except Exception:
+        return False
+
+    # Wait until the first card changes (SPA pagination)
+    deadline = time.time() + timeout / 1000.0
+    while time.time() < deadline:
+        try:
+            cur_cards = get_serp_cards(page, timeout=5000)
+            after_url = card_primary_url(cur_cards.first)
+            if after_url and after_url != before_url:
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(200)
+
+    return False
 
 def open_profile_from_card(page: Page, card: Locator, timeout: int = 15000) -> None:
     """

@@ -14,6 +14,8 @@ import re
 from extractors import (
     get_serp_cards,
     open_profile_from_card,
+    card_primary_url,
+    go_to_next_serp_page, 
     # existing field extractors:
     extract_name_from_profile, 
     extract_age_from_profile,
@@ -37,12 +39,16 @@ OUTPUT_CSV = Path("data/nannies.csv")
 
 JD_PATH = Path("data/jd.txt")
 
+_ID_RE = re.compile(r"/nyanya/[^/]+/(?P<id>\d+)(?:/|$)")
+
 def profile_id_from_url(u: str) -> str:
+    """Return numeric profile id from any /nyanya/<city>/<id> URL."""
     try:
-        last = urlparse(u).path.rstrip("/").split("/")[-1]
-        return last if last.isdigit() else u
+        path = urlparse(u).path
     except Exception:
-        return u
+        path = u or ""
+    m = _ID_RE.search(path)
+    return m.group("id") if m else path.rstrip("/") or u
 
 def textify(x: Any) -> str:
     """Return a clean string even if x is None / list / tuple / number."""
@@ -122,81 +128,124 @@ def scrape_open_profile(page, jd_text: str) -> dict:
         "explanation_bullets": " • ".join(reasons),
     }
 
-def scrape_all_profiles_on_current_serp(page, jd_text: str, *, cap: Optional[int] = None) -> int:
+def scrape_recent_on_current_serp(
+    page,
+    jd_text: str,
+    *,
+    cutoff_hours: int = 48,
+    cap: Optional[int] = None,
+    seen_ids: Optional[set] = None,  # <-- NEW
+) -> int:
     """
-    Iterates EVERY nanny card visible on the current SERP (no pagination here).
-    For each card: open -> scrape -> append -> go back -> rebind cards.
+    Single-SERP-page workflow:
+      1) COLLECT on the SERP: read last-active; keep only ≤ cutoff_hours
+      2) OPEN only those candidates not in `seen_ids`
     Returns number of rows written.
     """
+    cutoff_dt = datetime.now().astimezone() - timedelta(hours=cutoff_hours)
+    seen_ids = seen_ids if seen_ids is not None else set()
     written = 0
-    seen_ids_this_run: set[str] = set()  # <-- NEW
 
-    # Count once to define the target; we always rebind before each click.
+    # ---- 1) COLLECT (no navigation) -----------------------------------------
     cards = get_serp_cards(page)
     total = cards.count()
-    if cap is not None:
-        total = min(total, int(cap))
-
     print(f"[INFO] SERP shows {total} nanny cards.")
-    i = 0
-    while i < total:
-        # Rebind the card list because DOM is destroyed after navigation
-        cards = get_serp_cards(page)
-        if i >= cards.count():
-            break
 
+    candidates: List[Dict] = []
+    for i in range(total):
         card = cards.nth(i)
-
-        # try to capture href as hint
-        href_hint = ""
-        try:
-            href_el = card.locator("a[href^='/nyanya/']").first
-            if href_el.count() > 0:
-                _href = href_el.get_attribute("href") or ""
-                href_hint = _href if _href.startswith("http") else f"https://nashanyanya.ru{_href}"
-        except Exception:
-            pass
-
-        # Capture the "last seen on" text
         raw, last_dt = extract_last_active_from_card(card)
-        cutoff = datetime.now().astimezone() - timedelta(hours=48)
-        is_recent = bool(last_dt and last_dt >= cutoff)
+        url = card_primary_url(card)
+        pid = profile_id_from_url(url) if url else None
 
+        is_recent = bool(last_dt and last_dt >= cutoff_dt)
         print(
-            f"[{i+1}/{total}] | {href_hint} last_active_raw={raw!r} | "
+            f"[{i+1}/{total}] {url} | last_active_raw={raw!r} | "
             f"parsed={last_dt.isoformat() if last_dt else None} | recent_48h={is_recent}",
             flush=True
         )
 
-        # 1) Open the i-th profile using YOUR logic
-        open_profile_from_card(page, card)
+        if not (is_recent and url):
+            continue
+        if pid and pid in seen_ids:
+            print(f"[SKIP-page] already seen earlier this run: {url}", flush=True)
+            continue
 
-        # 2) Scrape + score
+        candidates.append({
+            "index": i,
+            "url": url,
+            "pid": pid,
+            "last_active_raw": raw,
+            "last_active_at": last_dt,
+        })
+        if cap is not None and len(candidates) >= cap:
+            break
+
+    print(f"[INFO] candidates ≤{cutoff_hours}h on this page: {len(candidates)}", flush=True)
+
+    # ---- 2) OPEN candidates (navigate, scrape, write) -----------------------
+    for j, c in enumerate(candidates, 1):
+        page.goto(c["url"], wait_until="domcontentloaded")
+
         row = scrape_open_profile(page, jd_text)
-        canonical = row.get("url") or href_hint or ""
-        pid = profile_id_from_url(canonical)
+        # audit fields from the SERP card
+        row["last_active_raw"] = c["last_active_raw"]
+        row["last_active_at"]  = c["last_active_at"].isoformat() if c["last_active_at"] else None
 
-        # 3) Write to CSV
-        if pid in seen_ids_this_run:
-            print(f"[SKIP] duplicate in this run: {canonical}")
-        else:
-            append_row(row, OUTPUT_CSV)
-            seen_ids_this_run.add(pid)
-            written += 1
-            print(f"[OK] [{i+1}/{total}] saved {row.get('name')!r} -> {canonical}")
+        append_row(row, OUTPUT_CSV)
+        if c["pid"]:
+            seen_ids.add(c["pid"])
+        written += 1
+        print(f"[OK] [{j}/{len(candidates)}] saved {row.get('name')!r} -> {row.get('url')}", flush=True)
 
-        # 4) Go back to SERP (fallback to direct SERP reload if no history)
+        # Back to SERP for the next candidate
         try:
             page.go_back(wait_until="domcontentloaded")
         except Exception:
             page.goto(SERP_URL, wait_until="domcontentloaded")
-
-        # Human-ish pacing
-        page.wait_for_timeout(450 + (i % 4) * 120)
-
-        i += 1
+        page.wait_for_timeout(300)
 
     return written
+
+def scrape_recent_across_pages(
+    page,
+    jd_text: str,
+    *,
+    cutoff_hours: int = 48,
+    cap_per_page: Optional[int] = None,
+    max_pages: Optional[int] = None
+) -> int:
+    total_written = 0
+    page_index = 1
+    seen_ids: set[str] = set()   # <-- shared across pages
+
+    while True:
+        print(f"\n[PAGE {page_index}] --------", flush=True)
+        written_this_page = scrape_recent_on_current_serp(
+            page, jd_text, cutoff_hours=cutoff_hours, cap=cap_per_page, seen_ids=seen_ids
+        )
+        total_written += written_this_page
+
+        # Early stop: when nothing recent left, later pages are older (sorted by date ↓)
+        if written_this_page == 0:
+            print("[INFO] Early stop: no ≤ cutoff candidates on this page.", flush=True)
+            break
+
+        if max_pages is not None and page_index >= max_pages:
+            print(f"[INFO] Reached max_pages={max_pages}.", flush=True)
+            break
+
+        moved = go_to_next_serp_page(page, timeout=12000)
+        if not moved:
+            print("[INFO] No (enabled) Next or page didn't change. Done.", flush=True)
+            break
+
+        page.wait_for_timeout(350)
+        page_index += 1
+
+    return total_written
+
+
 
 def main():
     if not STORAGE_STATE_PATH.exists():
@@ -217,7 +266,13 @@ def main():
         print(f"[INFO] Opening SERP: {SERP_URL}")
         page.goto(SERP_URL, wait_until="domcontentloaded")
 
-        rows_written = scrape_all_profiles_on_current_serp(page, jd_text, cap=None)  # set cap for testing
+        rows_written = scrape_recent_across_pages(
+            page,
+            jd_text,
+            cutoff_hours=48,
+            cap_per_page=None,   # e.g., set 5 while testing
+            max_pages=None       # e.g., set 3 while testing
+        )
         print(f"[INFO] Wrote {rows_written} rows to {OUTPUT_CSV}")
 
         # (Optional) Keep window open briefly for visual check
