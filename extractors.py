@@ -233,3 +233,27 @@ def extract_recommendations_from_profile(page, timeout: int = 6000) -> Tuple[int
             texts.append(" ".join(txt.split()))
 
     return n, texts
+
+def extract_has_audio_from_profile(page, timeout: int = 4000) -> bool:
+    """
+    Returns True if the profile has an audio message block/player, else False.
+    Works even if Angular-generated ids/classes vary.
+    """
+    candidate_selectors = [
+        "div.block.block_audio",                    # wrapper block
+        "text=Аудио-обращение",                     # header text
+        "nn-audio-message",                         # component tag
+        "nn-audio-player",                          # player wrapper
+        "audio[src*='audio.nashanyanya.ru']",       # concrete audio host
+        "audio[src$='.mp3']"                        # fallback: any mp3
+    ]
+
+    for sel in candidate_selectors:
+        try:
+            node = page.locator(sel).first
+            node.wait_for(state="visible", timeout=timeout)
+            return True
+        except PlaywrightTimeoutError:
+            continue
+
+    return False

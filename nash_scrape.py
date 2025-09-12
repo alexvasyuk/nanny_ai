@@ -14,6 +14,7 @@ from extractors import (
     extract_about_from_profile, 
     extract_education_from_profile,
     extract_recommendations_from_profile,
+    extract_has_audio_from_profile,
 )
 from io_csv import append_row
 
@@ -62,6 +63,7 @@ def main():
         experience_years = extract_experience_from_profile(profile_page) 
         about_content = extract_about_from_profile(profile_page)
         education = extract_education_from_profile(profile_page)
+        has_audio_message = extract_has_audio_from_profile(profile_page)
         rec_count, rec_texts = extract_recommendations_from_profile(profile_page) 
 
         # Use scorer.py
@@ -80,6 +82,7 @@ def main():
             "education": education,
             "recommendations_count": rec_count,
             "recommendations_texts": " REC END. | REC START: ".join(rec_texts) if rec_texts else "", 
+            "has_audio_message": has_audio_message,
             "about_content": about_content,
             "fit_score": fit_score, 
         }
