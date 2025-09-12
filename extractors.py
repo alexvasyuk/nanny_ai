@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 PROFILE_URL_RE = re.compile(r"/nyanya/moscow/\d+$")
+NBSP = u"\u00A0"
+
 
 def open_first_profile_from_serp(page, timeout=15000):
     """
@@ -153,3 +155,30 @@ def extract_experience_from_profile(page, timeout=3000) -> Optional[int]:
         pass
 
     return None
+
+
+def _clean_para(s: str) -> str:
+    # normalize whitespace but keep bullets/line breaks readable
+    s = s.replace(NBSP, " ").replace("\r", "")
+    # collapse 3+ newlines → two, and spaces around dashes
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    # trim each line
+    lines = [ln.strip() for ln in s.splitlines()]
+    s = "\n".join([ln for ln in lines if ln])
+    return s.strip()
+
+def extract_about_from_profile(page, timeout=6000) -> Optional[str]:
+    """
+    Extract 'О себе' from profile page.
+    """
+    container = page.locator("div.about__content div.about__texts").first
+    container.wait_for(state="visible", timeout=timeout)
+
+    # collect all <p> elements inside
+    paras = container.locator("p").all_inner_texts()
+    if not paras:
+        return None
+
+    cleaned = [_clean_para(p) for p in paras if p and p.strip()]
+    about_text = "\n\n".join(cleaned)
+    return about_text or None

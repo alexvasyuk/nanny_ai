@@ -4,12 +4,14 @@
 from pathlib import Path
 from datetime import datetime
 from playwright.sync_api import sync_playwright
+from scorer import score_with_chatgpt
 
 from extractors import (
     open_first_profile_from_serp, 
     extract_name_from_profile, 
     extract_age_from_profile,
     extract_experience_from_profile,
+    extract_about_from_profile, 
 )
 from io_csv import append_row
 
@@ -27,10 +29,18 @@ SERP_URL = (
 # Where to write results
 OUTPUT_CSV = Path("data/nannies.csv")
 
+JD_PATH = Path("data/jd.txt")
+
 def main():
     if not STORAGE_STATE_PATH.exists():
         print(f"[ERROR] Storage state not found at {STORAGE_STATE_PATH}. Run nash_login.py first.")
         return 1
+
+    if not JD_PATH.exists():
+        print(f"[ERROR] JD file not found at {JD_PATH}")
+        return 1
+
+    jd_text = JD_PATH.read_text(encoding="utf-8").strip()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
@@ -48,6 +58,13 @@ def main():
         name = extract_name_from_profile(profile_page)
         age = extract_age_from_profile(profile_page)
         experience_years = extract_experience_from_profile(profile_page) 
+        about_content = extract_about_from_profile(profile_page)
+
+        # Use scorer.py
+        fit_score = score_with_chatgpt(
+            jd_text=jd_text,
+            about_text=about_content,
+        )
 
         # Build a row and write to CSV
         row = {
@@ -56,6 +73,8 @@ def main():
             "name": name,
             "age": age,
             "experience_years": experience_years, 
+            "about_content": about_content,
+            "fit_score": fit_score, 
         }
         append_row(row, OUTPUT_CSV)
         print(f"[INFO] Wrote row to {OUTPUT_CSV}")
