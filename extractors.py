@@ -257,3 +257,33 @@ def extract_has_audio_from_profile(page, timeout: int = 4000) -> bool:
             continue
 
     return False
+
+def extract_has_fairy_tale_audio(page, timeout: int = 4000) -> bool:
+    """
+    Detects whether the profile has 'Записанные сказки' with an audio player.
+    Returns True/False.
+    """
+    # Primary: dedicated component/block
+    candidates = [
+        "nn-voice-acting-tales",                                  # component wrapper
+        "div.block:has(.block__title:has-text('Записанные сказки'))",  # block by header
+    ]
+    for sel in candidates:
+        try:
+            blk = page.locator(sel).first
+            blk.wait_for(state="visible", timeout=timeout)
+            # confirm there is an audio player inside this block
+            if blk.locator("audio, nn-audio-player").first.is_visible():
+                return True
+        except PlaywrightTimeoutError:
+            continue
+
+    # Fallback: any audio hosted in 'audio.nashanyanya.ru' inside a tales section
+    try:
+        node = page.locator("nn-voice-acting-tales audio[src*='audio.nashanyanya.ru']").first
+        node.wait_for(state="visible", timeout=timeout)
+        return True
+    except PlaywrightTimeoutError:
+        pass
+
+    return False

@@ -15,6 +15,7 @@ from extractors import (
     extract_education_from_profile,
     extract_recommendations_from_profile,
     extract_has_audio_from_profile,
+    extract_has_fairy_tale_audio,
 )
 from io_csv import append_row
 
@@ -65,6 +66,7 @@ def main():
         education = extract_education_from_profile(profile_page)
         has_audio_message = extract_has_audio_from_profile(profile_page)
         rec_count, rec_texts = extract_recommendations_from_profile(profile_page) 
+        has_fairy_tale_audio = extract_has_fairy_tale_audio(profile_page)
 
         # Use scorer.py
         fit_score = score_with_chatgpt(
@@ -83,6 +85,7 @@ def main():
             "recommendations_count": rec_count,
             "recommendations_texts": " REC END. | REC START: ".join(rec_texts) if rec_texts else "", 
             "has_audio_message": has_audio_message,
+            "has_fairy_tale_audio": has_fairy_tale_audio,
             "about_content": about_content,
             "fit_score": fit_score, 
         }
