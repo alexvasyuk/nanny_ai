@@ -1,7 +1,5 @@
 # scorer.py
-import os
-import re
-import sys
+import os, re, sys, json
 from openai import OpenAI
 
 from dotenv import load_dotenv
@@ -9,7 +7,7 @@ load_dotenv()  # reads .env and sets variables into os.environ
 
 MODEL = "gpt-4o-mini"  # fast & cost-efficient
 
-def score_with_chatgpt(jd_text: str, about_text: str) -> int:
+def score_with_chatgpt(jd_text: str, profile: dict) -> int:
     """
     Returns ONE integer 1..10. On any API issue, returns 0 and prints the reason to stderr.
     """
@@ -21,6 +19,8 @@ def score_with_chatgpt(jd_text: str, about_text: str) -> int:
     try:
         client = OpenAI(api_key=api_key)
 
+        profile_summary = json.dumps(profile, ensure_ascii=False, indent=2)
+
         system_msg = (
             "Ты — строгий оценщик соответствия профиля вакансии. "
             "Верни ОДНО целое число от 1 до 10 (без текста и пояснений). "
@@ -29,7 +29,7 @@ def score_with_chatgpt(jd_text: str, about_text: str) -> int:
         )
         user_msg = (
             f"JOB DESCRIPTION:\n{jd_text}\n\n"
-            f"ABOUT ME (из профиля):\n{about_text if about_text else '[нет текста]'}"
+            f"PROFILE (JSON):\n{profile_summary}"
         )
 
         resp = client.chat.completions.create(

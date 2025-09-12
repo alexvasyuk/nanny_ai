@@ -35,6 +35,9 @@ OUTPUT_CSV = Path("data/nannies.csv")
 
 JD_PATH = Path("data/jd.txt")
 
+def _trim(s, n=5000): 
+    return s[:n] if isinstance(s, str) else s
+
 def main():
     if not STORAGE_STATE_PATH.exists():
         print(f"[ERROR] Storage state not found at {STORAGE_STATE_PATH}. Run nash_login.py first.")
@@ -69,9 +72,27 @@ def main():
         has_fairy_tale_audio = extract_has_fairy_tale_audio(profile_page)
 
         # Use scorer.py
+
+        profile_payload = {
+            "name": name,
+            "age": age,
+            "experience_years": experience_years,
+            "education": education,                         # string
+            "about_content": _trim(about_content, 5000),    # string
+            "recommendations_count": rec_count,             # int
+            "recommendations_texts": [ _trim(t, 1500) for t in rec_texts[:3] ],             # list of strings
+            "has_audio_message": has_audio_message,         # bool
+            "has_fairy_tale_audio": has_fairy_tale_audio,   # bool
+            # add more when you extract them later:
+            # "location": location,
+            # "work_type": work_type,
+            # "rate_hourly": rate_hourly,
+            # "rate_monthly": rate_monthly,
+            # "verified_docs": verified_docs,
+        }
         fit_score = score_with_chatgpt(
             jd_text=jd_text,
-            about_text=about_content,
+            profile=profile_payload,
         )
 
         # Build a row and write to CSV
