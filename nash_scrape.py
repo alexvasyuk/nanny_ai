@@ -90,8 +90,9 @@ def main():
             # "rate_monthly": rate_monthly,
             # "verified_docs": verified_docs,
         }
-        fit_score = score_with_chatgpt(
-            jd_text=jd_text,
+
+        fit_score, fit_reasons = score_with_chatgpt(
+            jd_text=jd_text, 
             profile=profile_payload,
         )
 
@@ -109,6 +110,7 @@ def main():
             "has_fairy_tale_audio": has_fairy_tale_audio,
             "about_content": about_content,
             "fit_score": fit_score, 
+            "fit_reasons": " • ".join(fit_reasons),
         }
         append_row(row, OUTPUT_CSV)
         print(f"[INFO] Wrote row to {OUTPUT_CSV}")
