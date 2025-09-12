@@ -1,5 +1,7 @@
 # extractors.py
-from typing import Optional
+
+# --- LAST ACTIVE (RU) PARSER --------------------------------------------------
+from __future__ import annotations
 
 import re
 from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
@@ -8,6 +10,160 @@ from typing import Optional, Tuple, List
 
 PROFILE_URL_RE = re.compile(r".*/nyanya/[^/]+/\d+/?$")
 NBSP = u"\u00A0"
+
+# Russian months (genitive case as shown on the site)
+_RU_MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+    "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+    "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+
+# Regexes for relative times
+_RE_REL = re.compile(
+    r"(?P<num>\d+)\s*(?P<unit>минут(?:а|ы)?|час(?:а|ов)?|дн(?:ей|я|eй|ё?н[ья])?)\s*назад",
+    re.IGNORECASE
+)
+
+_RE_TIME = re.compile(r"(?P<h>\d{1,2}):(?P<m>\d{2})")
+
+# Examples the site shows (varies):
+# "Была на сайте: Сейчас"
+# "Был на сайте: Сегодня"
+# "Была на сайте: Вчера в 11:20"
+# "Был на сайте: 15 минут назад"
+# "Была на сайте: 2 часа назад"
+# "Был на сайте: 3 дня назад"
+# "Была на сайте: 14 февраля 2025 в 09:30"
+def parse_last_active_ru(raw: str, *, now: Optional[datetime] = None) -> Optional[datetime]:
+    """
+    Convert Russian 'last active' string to a timezone-aware datetime (local tz).
+    Returns None if cannot parse confidently.
+
+    Heuristics:
+      - 'Сейчас' -> now
+      - 'Сегодня' -> today (if no time, we use 'now' to guarantee <24h)
+      - 'Вчера' -> yesterday (if no time, we set 12:00 to avoid off-by-one hour issues)
+      - '<N> минут/часов/дней назад' -> subtract delta
+      - 'DD <month> [YYYY] [в HH:MM]' -> absolute date
+    """
+    if not raw:
+        return None
+
+    text = raw.strip().lower().replace("ё", "е")
+    now = now or datetime.now().astimezone()
+
+    # 1) Сейчас
+    if "сейчас" in text:
+        return now
+
+    # 2) Сегодня [в HH:MM]
+    if "сегодня" in text:
+        mt = _RE_TIME.search(text)
+        if mt:
+            h, m = int(mt.group("h")), int(mt.group("m"))
+            return now.replace(hour=h, minute=m, second=0, microsecond=0)
+        # No time given: still within 24h, return 'now'
+        return now
+
+    # 3) Вчера [в HH:MM]
+    if "вчера" in text:
+        mt = _RE_TIME.search(text)
+        base = (now - timedelta(days=1))
+        if mt:
+            h, m = int(mt.group("h")), int(mt.group("m"))
+            return base.replace(hour=h, minute=m, second=0, microsecond=0)
+        # Noon yesterday as a reasonable center
+        return base.replace(hour=12, minute=0, second=0, microsecond=0)
+
+    # 4) Relative: "<N> ... назад"
+    mrel = _RE_REL.search(text)
+    if mrel:
+        num = int(mrel.group("num"))
+        unit = mrel.group("unit")
+        if unit.startswith("минут"):
+            return now - timedelta(minutes=num)
+        if unit.startswith("час"):
+            return now - timedelta(hours=num)
+        # days (дней/дня/дней/днeй etc)
+        return now - timedelta(days=num)
+
+    # 5) Absolute: "DD <месяц> [YYYY] [в HH:MM]"
+    #    e.g., "14 февраля 2025 в 09:30", "3 марта в 8:00", "7 июня"
+    #    Year is optional; assume current year if missing.
+    abs_re = re.compile(
+        r"(?P<d>\d{1,2})\s+(?P<mon>[а-я]+)(?:\s+(?P<y>\d{4}))?(?:\s+в\s+(?P<h>\d{1,2}):(?P<m>\d{2}))?",
+        re.IGNORECASE
+    )
+    ma = abs_re.search(text)
+    if ma:
+        d = int(ma.group("d"))
+        mon_str = ma.group("mon")
+        mon = _RU_MONTHS.get(mon_str, None)
+        if mon is None:
+            return None
+        y = int(ma.group("y")) if ma.group("y") else now.year
+        h = int(ma.group("h")) if ma.group("h") else 12
+        m = int(ma.group("m")) if ma.group("m") else 0
+        try:
+            dt = datetime(y, mon, d, h, m)
+            # attach local tz
+            return now.tzinfo.localize(dt) if hasattr(now.tzinfo, "localize") else dt.replace(tzinfo=now.tzinfo)
+        except ValueError:
+            return None
+
+    return None
+
+def _slice_last_active(raw: Optional[str]) -> Optional[str]:
+    """Return only 'Был(а) на сайте: ...' from a longer blob."""
+    if not raw:
+        return None
+    t = raw.replace("\xa0", " ").strip()
+
+    # Grab the value right after the label, stop at bullet/newline
+    m = re.search(r"Был[а]?\s+на\s+сайте[:\s]+(?P<val>[^•\n\r]+)", t, flags=re.IGNORECASE)
+    if m:
+        val = re.sub(r"\s+", " ", m.group("val")).strip(" .,:;")
+        return f"Был(а) на сайте: {val}"
+
+    # Fallback: if label is present without colon or odd spacing
+    m = re.search(
+        r"(Был[а]?\s+на\s+сайте)\s*(?P<val>сейчас|сегодня|вчера|[\d\s]+(?:минут|час|дн)[^•\n\r]*)",
+        t, flags=re.IGNORECASE
+    )
+    if m:
+        val = re.sub(r"\s+", " ", m.group("val")).strip(" .,:;")
+        return f"Был(а) на сайте: {val}"
+
+    return None
+
+
+def extract_last_active_from_card(card, timeout: int = 1200) -> Tuple[Optional[str], Optional[datetime]]:
+    """
+    Read 'Был(а) на сайте: ...' from a SERP card and return (raw_text, parsed_dt).
+    Never throws on absence; returns (None, None) if not found.
+    """
+    raw: Optional[str] = None
+
+    # 1) Preferred: an element that contains the label
+    try:
+        badge = card.locator("text=/Был[а]?\\s+на\\s+сайте/i").first
+        badge.wait_for(state="attached", timeout=timeout)
+        blob = (badge.inner_text() or "").replace("\xa0", " ").strip()
+        raw = _slice_last_active(blob)
+    except Exception:
+        pass
+
+    # 2) Fallback: whole-card text → slice just the label part
+    if not raw:
+        try:
+            blob = (card.inner_text(timeout=timeout) or "").replace("\xa0", " ").strip()
+            raw = _slice_last_active(blob)
+        except Exception:
+            pass
+
+    parsed = parse_last_active_ru(raw) if raw else None
+    return raw, parsed
+
 
 # Root selector(s) for SERP cards (both custom tag and class fallback)
 CARD_SELECTOR = "nn-nanny-resume-card:visible"

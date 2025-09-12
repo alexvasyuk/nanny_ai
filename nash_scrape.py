@@ -8,6 +8,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright
 from scorer import score_with_chatgpt
 from io_csv import append_row
+from datetime import datetime, timedelta
 import re
 
 from extractors import (
@@ -22,18 +23,14 @@ from extractors import (
     extract_recommendations_from_profile,
     extract_has_audio_from_profile,
     extract_has_fairy_tale_audio,
+    extract_last_active_from_card,
 )
 
 # Reuse session saved by nash_login.py
 STORAGE_STATE_PATH = Path("data/session.json")
 
 # Your encoded SERP URL (with hasAudioMessage=true)
-SERP_URL = (
-    'https://nashanyanya.ru/nyanya/moscow;query=%7B%22notSmoke%22%3Atrue%2C%22sortOrder%22%3A1'
-    '%2C%22withPhoto%22%3Atrue%2C%22yearExperience%22%3A3%2C%22sortBy%22%3A%22Relevance%22'
-    '%2C%22liveInOuts%22%3A%5B2%5D%2C%22employments%22%3A%5B1%2C2%5D%2C%22ageGroups%22%3A%5B3%2C4%5D'
-    '%2C%22workingExperienceAges%22%3A%5B4%2C5%2C6%5D%2C%22hasAudioMessage%22%3Atrue%7D'
-)
+SERP_URL = 'https://nashanyanya.ru/nyanya/moscow;query=%7B%22notSmoke%22:true,%22sortOrder%22:1,%22withPhoto%22:true,%22yearExperience%22:3,%22sortBy%22:%22Activity%22,%22liveInOuts%22:%5B2%5D,%22employments%22:%5B1,2%5D,%22ageGroups%22:%5B3,4%5D,%22workingExperienceAges%22:%5B4,5,6%5D,%22hasAudioMessage%22:true%7D'
 
 # Where to write results
 OUTPUT_CSV = Path("data/nannies.csv")
@@ -159,6 +156,17 @@ def scrape_all_profiles_on_current_serp(page, jd_text: str, *, cap: Optional[int
                 href_hint = _href if _href.startswith("http") else f"https://nashanyanya.ru{_href}"
         except Exception:
             pass
+
+        # Capture the "last seen on" text
+        raw, last_dt = extract_last_active_from_card(card)
+        cutoff = datetime.now().astimezone() - timedelta(hours=48)
+        is_recent = bool(last_dt and last_dt >= cutoff)
+
+        print(
+            f"[{i+1}/{total}] | {href_hint} last_active_raw={raw!r} | "
+            f"parsed={last_dt.isoformat() if last_dt else None} | recent_48h={is_recent}",
+            flush=True
+        )
 
         # 1) Open the i-th profile using YOUR logic
         open_profile_from_card(page, card)
