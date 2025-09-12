@@ -182,3 +182,25 @@ def extract_about_from_profile(page, timeout=6000) -> Optional[str]:
     cleaned = [_clean_para(p) for p in paras if p and p.strip()]
     about_text = "\n\n".join(cleaned)
     return about_text or None
+
+
+def extract_education_from_profile(page, timeout: int = 6000) -> str:
+    """
+    Returns the 'Образование' block as a single cleaned string.
+    Falls back to locating the block by its header text.
+    """
+    # Primary: the footer of the education block
+    candidates = [
+        page.locator("nn-worker-educations .block__footer"),
+        page.locator("div.block:has(h2.block__title:has-text('Образование')) .block__footer"),
+    ]
+    for loc in candidates:
+        try:
+            loc.wait_for(state="visible", timeout=timeout)
+            raw = loc.inner_text().strip()
+            # collapse whitespace & line breaks
+            cleaned = " ".join(line.strip() for line in raw.splitlines() if line.strip())
+            return cleaned
+        except PlaywrightTimeoutError:
+            continue
+    return ""

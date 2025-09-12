@@ -12,6 +12,7 @@ from extractors import (
     extract_age_from_profile,
     extract_experience_from_profile,
     extract_about_from_profile, 
+    extract_education_from_profile,
 )
 from io_csv import append_row
 
@@ -59,6 +60,7 @@ def main():
         age = extract_age_from_profile(profile_page)
         experience_years = extract_experience_from_profile(profile_page) 
         about_content = extract_about_from_profile(profile_page)
+        education = extract_education_from_profile(profile_page) 
 
         # Use scorer.py
         fit_score = score_with_chatgpt(
@@ -73,6 +75,7 @@ def main():
             "name": name,
             "age": age,
             "experience_years": experience_years, 
+            "education": education,  
             "about_content": about_content,
             "fit_score": fit_score, 
         }
