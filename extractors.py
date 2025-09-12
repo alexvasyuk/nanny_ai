@@ -1,34 +1,44 @@
 # extractors.py
+from typing import Optional
+
 import re
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 from datetime import date, datetime, timezone
 from typing import Optional, Tuple, List
 
-PROFILE_URL_RE = re.compile(r"/nyanya/moscow/\d+$")
+PROFILE_URL_RE = re.compile(r".*/nyanya/[^/]+/\d+/?$")
 NBSP = u"\u00A0"
 
+# Root selector(s) for SERP cards (both custom tag and class fallback)
+CARD_SELECTOR = "nn-nanny-resume-card:visible"
 
-def open_first_profile_from_serp(page, timeout=15000):
+def get_serp_cards(page: Page, timeout: int = 15000) -> Locator:
     """
-    On the SERP, open the first nanny profile.
-    1) Click first <a href="/nyanya/moscow/..."> inside first card
-    2) Fallback: click 'Подробнее' button
-    Then wait for SPA URL /nyanya/moscow/<id>.
+    Return a locator for ALL nanny cards on the current SERP.
     """
-    # wait for first card component
-    first_card = page.locator("nn-nanny-resume-card").first
-    first_card.wait_for(state="visible", timeout=timeout)
+    cards = page.locator(CARD_SELECTOR)
+    cards.first.wait_for(state="visible", timeout=timeout)
+    return cards
 
+def open_profile_from_card(page: Page, card: Locator, timeout: int = 15000) -> None:
+    """
+    Reuses your proven logic:
+
+    1) Prefer a direct <a href^='/nyanya/moscow/'> inside the card (avatar/name).
+    2) Fallback to the 'Подробнее' button.
+    3) Wait for SPA to land on /nyanya/moscow/<id>, or fall back to
+       presence of contact controls on the profile page.
+    """
     # A) direct link (avatar or name)
-    link = first_card.locator("a[href^='/nyanya/moscow/']").first
+    link = card.locator("a[href^='/nyanya/']").first
     if link.count() > 0:
         link.scroll_into_view_if_needed()
         link.click()
     else:
         # B) fallback: the "Подробнее" button
-        more_btn = first_card.locator("button.button-chevron, .card-resume__more .button-chevron").first
+        more_btn = card.locator("button.button-chevron, .card-resume__more .button-chevron").first
         if more_btn.count() == 0:
-            more_btn = first_card.get_by_text("Подробнее", exact=False).first
+            more_btn = card.get_by_text("Подробнее", exact=False).first
         more_btn.scroll_into_view_if_needed()
         more_btn.click()
 
@@ -37,11 +47,11 @@ def open_first_profile_from_serp(page, timeout=15000):
         page.wait_for_url(PROFILE_URL_RE, timeout=timeout)
     except PlaywrightTimeoutError:
         try:
-            page.locator("text=НАПИСАТЬ, a[href^='tel:']").first.wait_for(state="visible", timeout=timeout)
+            page.locator("text=НАПИСАТЬ, a[href^='tel:']").first.wait_for(
+                state="visible", timeout=timeout
+            )
         except PlaywrightTimeoutError:
             pass
-    return page
-
 
 def extract_name_from_profile(page, timeout=5000):
     """
@@ -205,34 +215,32 @@ def extract_education_from_profile(page, timeout: int = 6000) -> str:
             continue
     return ""
 
-def extract_recommendations_from_profile(page, timeout: int = 6000) -> Tuple[int, List[str]]:
+def extract_recommendations_from_profile(page, timeout: int = 1200):
     """
-    Returns (count, texts[]) for the 'Мои рекомендатели' block.
-    Robust to the block being collapsed.
+    Return list[str] or None. Never blocks the crawl if the section is absent.
     """
-    container = page.locator("nn-resume-recommendation-list")
-    container.wait_for(state="visible", timeout=timeout)
-
-    # Expand if there's a "Показать/Скрыть" toggle
+    sel = "nn-resume-recommendation-list"
+    cont = page.locator(sel)
     try:
-        toggle = container.locator(".recomm__more .button-toggle")
-        if toggle.is_visible():
-            toggle.click()
-    except Exception:
-        pass  # not critical
+        # 'attached' is enough; some blocks are hidden by default
+        cont.wait_for(state="attached", timeout=timeout)
+    except PlaywrightTimeoutError:
+        return None
 
-    items = container.locator(".recomm__item")
+    items = cont.locator("li, nn-resume-recommendation-item")
     n = items.count()
+    if n == 0:
+        return None
 
-    texts: List[str] = []
-    for i in range(n):
-        # each item has .recomm__content (the full recommendation text)
-        txt = items.nth(i).locator(".recomm__content").inner_text(timeout=timeout).strip()
-        if txt:
-            # normalize whitespace a bit
-            texts.append(" ".join(txt.split()))
-
-    return n, texts
+    out = []
+    for i in range(min(n, 12)):
+        try:
+            t = items.nth(i).inner_text(timeout=500).strip()
+            if t:
+                out.append(t)
+        except Exception:
+            continue
+    return out or None
 
 def extract_has_audio_from_profile(page, timeout: int = 4000) -> bool:
     """
