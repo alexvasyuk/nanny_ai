@@ -2,7 +2,7 @@
 import re
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple, List
 
 PROFILE_URL_RE = re.compile(r"/nyanya/moscow/\d+$")
 NBSP = u"\u00A0"
@@ -204,3 +204,32 @@ def extract_education_from_profile(page, timeout: int = 6000) -> str:
         except PlaywrightTimeoutError:
             continue
     return ""
+
+def extract_recommendations_from_profile(page, timeout: int = 6000) -> Tuple[int, List[str]]:
+    """
+    Returns (count, texts[]) for the 'Мои рекомендатели' block.
+    Robust to the block being collapsed.
+    """
+    container = page.locator("nn-resume-recommendation-list")
+    container.wait_for(state="visible", timeout=timeout)
+
+    # Expand if there's a "Показать/Скрыть" toggle
+    try:
+        toggle = container.locator(".recomm__more .button-toggle")
+        if toggle.is_visible():
+            toggle.click()
+    except Exception:
+        pass  # not critical
+
+    items = container.locator(".recomm__item")
+    n = items.count()
+
+    texts: List[str] = []
+    for i in range(n):
+        # each item has .recomm__content (the full recommendation text)
+        txt = items.nth(i).locator(".recomm__content").inner_text(timeout=timeout).strip()
+        if txt:
+            # normalize whitespace a bit
+            texts.append(" ".join(txt.split()))
+
+    return n, texts
