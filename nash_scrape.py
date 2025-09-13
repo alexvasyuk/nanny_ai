@@ -11,7 +11,7 @@ from scorer import score_with_chatgpt
 from io_csv import append_row
 from datetime import datetime, timedelta
 import re
-from gsheets import upsert_nannies, append_run_row
+from gsheets import upsert_nannies, append_run_row, load_existing_ids
 
 from extractors import (
     get_serp_cards,
@@ -173,8 +173,17 @@ def scrape_recent_on_current_serp(
 
         if not (is_recent and url):
             continue
+            
         if pid and pid in seen_ids:
-            print(f"[SKIP-page] already seen earlier this run: {url}", flush=True)
+            if sink is not None:
+                sink.append({
+                    "profile_id": pid,
+                    "profile_url": url,
+                    "last_active_raw": raw,
+                    "last_active_at": last_dt.isoformat() if last_dt else None,
+                })
+            print(f"[SKIP-open] known in sheet; queued last_active update: {url}", flush=True)
+            written += 1            # <-- so pagination won't early-stop on this page
             continue
 
         candidates.append({
@@ -224,7 +233,7 @@ def scrape_recent_across_pages(
 ) -> int:
     total_written = 0
     page_index = 1
-    seen_ids: set[str] = set()   # <-- shared across pages
+    seen_ids = seen_ids or set()
     rows_accum: list[dict] = []     
 
     while True:
@@ -290,12 +299,17 @@ def main():
         print(f"[INFO] Opening SERP: {SERP_URL}")
         page.goto(SERP_URL, wait_until="domcontentloaded")
 
+        _, _, id_to_row, _ = load_existing_ids(args.sa_json, args.sheet_id)
+        known_ids = set(id_to_row.keys())
+        print(f"[SHEETS] known profiles in sheet: {len(known_ids)}")
+
         total_written, rows_accum = scrape_recent_across_pages(
             page,
             jd_text,
             cutoff_hours=args.since_hours,
             cap_per_page=args.cap_per_page,
             max_pages=args.max_pages,
+            seen_ids=known_ids,
         )
         pages_scanned = "N/A" if args.max_pages is None else args.max_pages  # set a real count if you tracked it
 
