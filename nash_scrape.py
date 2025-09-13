@@ -121,6 +121,7 @@ def scrape_open_profile(page, jd_text: str) -> dict:
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "profile_id": profile_id_from_url(url_now),
         "url": url_now,
+        "profile_url": url_now,
         "name": name,
         "age": age,
         "experience_years": experience,

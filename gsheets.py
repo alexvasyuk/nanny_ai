@@ -41,6 +41,7 @@ MACHINE_UPDATE_COLS = [
     "last_active_raw",
     "last_active_at",
     "last_seen_at",
+    "profile_url",  
     # optionally keep score fresh—include the two below if you want that
     # "score",
     # "explanation_bullets",
@@ -73,23 +74,36 @@ def _ensure_headers(ws: gspread.Worksheet, headers: List[str]) -> Dict[str, int]
 
 # ------------------------- Read existing IDs -------------------------
 
-def load_existing_ids(sa_json: str, spreadsheet_id: str) -> Tuple[gspread.Worksheet, Dict[str, int], Dict[str, int]]:
+def load_existing_ids(sa_json: str, spreadsheet_id: str):
     """
-    Return (worksheet, header_map, id_to_row).
-    id_to_row maps profile_id -> row_index (2-based and beyond).
+    Return (worksheet, header_map, id_to_row, existing_urls_by_id).
+    id_to_row: profile_id -> row index (2-based)
+    existing_urls_by_id: profile_id -> profile_url (if present)
     """
     sh = _open_sheet(sa_json, spreadsheet_id)
     ws = _get_or_create_ws(sh, NANNIES_SHEET)
     header_map = _ensure_headers(ws, NANNIES_HEADERS)
 
-    # read the profile_id column
     id_col = header_map["profile_id"]
-    col_vals = ws.col_values(id_col)  # includes header at [0]
+    url_col = header_map.get("profile_url")
+
+    ids  = ws.col_values(id_col)                 # includes header at [0]
+    urls = ws.col_values(url_col) if url_col else []
+
     id_to_row: Dict[str, int] = {}
-    for i, val in enumerate(col_vals[1:], start=2):  # start at row 2
-        if val:
-            id_to_row[val] = i
-    return ws, header_map, id_to_row
+    existing_urls_by_id: Dict[str, str] = {}
+
+    for i, pid in enumerate(ids[1:], start=2):   # start row=2
+        if not pid:
+            continue
+        id_to_row[pid] = i
+        if url_col and (i - 1) < len(urls):
+            u = urls[i - 1]
+            if u:
+                existing_urls_by_id[pid] = u
+
+    return ws, header_map, id_to_row, existing_urls_by_id
+
 
 # ------------------------- Append NEW rows -------------------------
 
@@ -165,54 +179,47 @@ def append_run_row(sa_json: str, spreadsheet_id: str, run_info: dict) -> None:
 
 # ------------------------- Coordinated UPSERT -------------------------
 
-def upsert_nannies(
-    sa_json: str,
-    spreadsheet_id: str,
-    scraped_rows: List[dict],
-    *,
-    new_only: bool = False,
-) -> Tuple[int, int]:
-    """
-    Upsert all scraped rows into the Nannies sheet.
-    Returns (new_inserted, updated_existing).
-    """
-    ws, header_map, id_to_row = load_existing_ids(sa_json, spreadsheet_id)
+def upsert_nannies(sa_json: str, spreadsheet_id: str, scraped_rows: List[dict], *, new_only: bool = False):
+    ws, header_map, id_to_row, existing_urls_by_id = load_existing_ids(sa_json, spreadsheet_id)
 
     to_insert: List[dict] = []
     to_update_by_row: Dict[int, dict] = {}
-
     now_iso = dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
     for r in scraped_rows:
         pid = str(r.get("profile_id") or "").strip()
         if not pid:
-            # cannot index without ID; skip
             continue
 
-        # Ensure required fields exist
-        r.setdefault("profile_url", "")
+        # normalize url -> profile_url
+        r.setdefault("profile_url", r.get("url", ""))
+
+        # defaults for NEW rows
         r.setdefault("first_seen_at", now_iso)
         r.setdefault("last_seen_at", now_iso)
-        # default human fields for NEW rows
         r.setdefault("status", "New")
         r.setdefault("owner", "")
         r.setdefault("notes", "")
         r.setdefault("last_contacted_at", "")
 
         if pid not in id_to_row:
-            # NEW
             to_insert.append(r)
-        else:
-            if new_only:
-                # Don't touch existing rows
-                continue
-            row_idx = id_to_row[pid]
-            # Prepare partial update payload (machine-only)
-            upd = {k: r.get(k) for k in set(MACHINE_UPDATE_COLS)}
-            # Always refresh last_seen_at
-            upd["last_seen_at"] = now_iso
-            to_update_by_row[row_idx] = upd
+            continue
+
+        if new_only:
+            continue
+
+        row_idx = id_to_row[pid]
+        upd = {k: r.get(k) for k in set(MACHINE_UPDATE_COLS)}
+        upd["last_seen_at"] = now_iso
+
+        # backfill profile_url only if currently blank in sheet
+        if not existing_urls_by_id.get(pid) and r.get("profile_url"):
+            upd["profile_url"] = r["profile_url"]
+
+        to_update_by_row[row_idx] = upd
 
     new_count = append_new_rows(ws, header_map, to_insert)
     upd_count = 0 if new_only else batch_update_machine_fields(ws, header_map, to_update_by_row)
     return new_count, upd_count
+

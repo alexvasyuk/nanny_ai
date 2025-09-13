@@ -1,11 +1,33 @@
 # scorer.py
-import os, re, sys, json
+import os, re, sys, json, httpx
 from openai import OpenAI
 
 from dotenv import load_dotenv
 load_dotenv()  # reads .env and sets variables into os.environ
 
 MODEL = "gpt-4o-mini"  # fast & cost-efficient
+
+
+def make_openai_client() -> OpenAI:
+    proxy = os.getenv("OPENAI_PROXY")  # e.g. socks5://127.0.0.1:1080  OR socks5h://…
+    if not proxy:
+        return OpenAI()
+
+    scheme = proxy.split(":", 1)[0].lower()
+
+    if scheme.startswith("socks5"):                   # accept socks5 and socks5h
+        # normalize for httpx-socks/python-socks
+        proxy_url = proxy.replace("socks5h://", "socks5://", 1)
+        from httpx_socks import SyncProxyTransport    # pip install httpx-socks
+        transport = SyncProxyTransport.from_url(proxy_url)  # rdns=True by default
+        http_client = httpx.Client(transport=transport, timeout=60)
+    else:                                             # HTTP/HTTPS proxy
+        http_client = httpx.Client(
+            transport=httpx.HTTPTransport(proxy=proxy),
+            timeout=60,
+        )
+
+    return OpenAI(http_client=http_client)
 
 def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
     """
@@ -16,7 +38,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
     if not api_key:
         return 0, ["error: OPENAI_API_KEY not set"]
 
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client()
 
     profile_summary = json.dumps(profile, ensure_ascii=False, indent=2)
 
