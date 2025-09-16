@@ -12,6 +12,7 @@ from io_csv import append_row
 from datetime import datetime, timedelta
 import re
 from gsheets import upsert_nannies, append_run_row, load_existing_ids
+import os
 
 from extractors import (
     get_serp_cards,
@@ -82,7 +83,7 @@ def intify(x: Any) -> Optional[int]:
 def _trim(s, n=5000): 
     return s[:n] if isinstance(s, str) else s
 
-def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False) -> dict:
+def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_address: str = "") -> dict:
     """
     Assumes we are already on a profile page after clicking from SERP.
     Scrapes fields, scores via OpenAI, returns a row for CSV.
@@ -93,7 +94,7 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False) -> dict:
     about_raw       = extract_about_from_profile(page)
     education_raw   = extract_education_from_profile(page)
     recs_raw        = extract_recommendations_from_profile(page)
-    location_raw        = extract_location_from_profile(page)
+    location_raw    = extract_location_from_profile(page)
 
     # Current canonical URL:
     url_now = page.url
@@ -107,21 +108,27 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False) -> dict:
     experience  = intify(experience_raw)
     location = textify(location_raw)
 
+    payload = {
+        "url": url_now,
+        "name": name,
+        "age": age,
+        "experience": experience,
+        "about": about,
+        "education": education,
+        "recommendations": recs,
+        "location": location,
+        "home_address": home_address
+    }
+
     if no_openai:
-        score, reasons = 0, ["skipped (no-openai)"]
+        score, reasons, travel_time = 0, ["skipped (no-openai)"], None
     else:
-        score, reasons = score_with_chatgpt(
+        score, reasons, travel_time = score_with_chatgpt(
             jd_text,
-            {
-                "url": url_now,
-                "name": name,
-                "age": age,
-                "experience": experience,
-                "about": about,
-                "education": education,
-                "recommendations": recs,
-            },
+            payload,
         )
+        if os.getenv("SCORER_DEBUG") == "1":
+            print(f"[SCORER] score={score} travel_time_min={travel_time} for {url_now}", flush=True)  # one-line debug
 
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -137,6 +144,7 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False) -> dict:
         "score": score,
         "explanation_bullets": " • ".join(reasons),
         "location": location,
+        "travel_time_min": travel_time,
     }
 
 def scrape_recent_on_current_serp(
@@ -147,7 +155,8 @@ def scrape_recent_on_current_serp(
     cap: Optional[int] = None,
     seen_ids: Optional[set] = None,  
     sink: Optional[list] = None, 
-    no_openai: bool = False,    
+    no_openai: bool = False,
+    home_address: str = "",       
 ) -> int:
     """
     Single-SERP-page workflow:
@@ -210,7 +219,7 @@ def scrape_recent_on_current_serp(
     for j, c in enumerate(candidates, 1):
         page.goto(c["url"], wait_until="domcontentloaded")
 
-        row = scrape_open_profile(page, jd_text, no_openai=no_openai)
+        row = scrape_open_profile(page, jd_text, no_openai=no_openai, home_address=home_address)
         # audit fields from the SERP card
         row["last_active_raw"] = c["last_active_raw"]
         row["last_active_at"]  = c["last_active_at"].isoformat() if c["last_active_at"] else None
@@ -239,6 +248,7 @@ def scrape_recent_across_pages(
     max_pages: Optional[int] = None,
     seen_ids: Optional[set] = None,  
     no_openai: bool = False,
+    home_address: str = "",
 ) -> int:
     total_written = 0
     page_index = 1
@@ -254,7 +264,8 @@ def scrape_recent_across_pages(
             cap=cap_per_page, 
             seen_ids=seen_ids,
             sink=rows_accum,
-            no_openai=no_openai,  
+            no_openai=no_openai,
+            home_address=home_address,     
         )
         total_written += written_this_page
 
@@ -290,6 +301,12 @@ def main():
     parser.add_argument("--cap-per-page", type=int, default=None)
     parser.add_argument("--new-only", action="store_true", help="Insert only new; don't update existing")
     parser.add_argument("--no-openai", action="store_true", help="Skip scoring with OpenAI")
+    parser.add_argument(                                   # <-- ADD
+        "--home-address",
+        dest="home_address",
+        default=os.getenv("HOME_ADDRESS", ""),
+        help="Your address for travel-time estimate (quote if it has spaces)",
+    )
     args = parser.parse_args()
 
     if not STORAGE_STATE_PATH.exists():
@@ -322,6 +339,7 @@ def main():
             max_pages=args.max_pages,
             seen_ids=known_ids,
             no_openai=args.no_openai, 
+            home_address=args.home_address,
         )
         pages_scanned = "N/A" if args.max_pages is None else args.max_pages  # set a real count if you tracked it
 
