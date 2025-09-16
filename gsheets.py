@@ -17,6 +17,7 @@ NANNIES_HEADERS: List[str] = [
     "profile_id",
     "profile_url",
     "name",
+    "phone",       
     "location",
     "travel_time_min", 
     "age",
@@ -44,8 +45,8 @@ MACHINE_UPDATE_COLS = [
     "last_seen_at",
     "profile_url",  
     # optionally keep score fresh—include the two below if you want that
-    "score",
-    "explanation_bullets",
+    # "score",
+    # "explanation_bullets",
 ]
 
 def _client(sa_json: str) -> gspread.Client:

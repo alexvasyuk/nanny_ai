@@ -37,6 +37,90 @@ _RE_TIME = re.compile(r"(?P<h>\d{1,2}):(?P<m>\d{2})")
 # --- SERP card → absolute URL -------------------------------------------------
 BASE = "https://nashanyanya.ru"
 
+
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+import re, os
+
+def extract_phone_number(page, timeout: int = 8000) -> Optional[str]:
+    """
+    Clicks the green 'Телефон' button on the profile and reads the phone number
+    from the bottom-sheet popup (selector: a.phone). Returns E.164 (+7...) or None.
+    Set PHONES_DEBUG=1 for debug logs.
+    """
+    dbg = os.getenv("PHONES_DEBUG") == "1"
+
+    # 1) Click the 'Телефон' button
+    try:
+        btn = page.locator(
+            "nn-show-resume-phone-button.card__phone button, "
+            "nn-show-resume-phone-button button, "
+            ".card__phone button"
+        ).first
+        btn.wait_for(state="visible", timeout=timeout)
+        if dbg: print("[PHONE] Clicking phone button...", flush=True)
+        btn.click()
+    except PlaywrightTimeoutError:
+        if dbg: print("[PHONE] phone button not found/visible", flush=True)
+        return None
+    except Exception as e:
+        if dbg: print(f"[PHONE] click error: {e}", flush=True)
+        return None
+
+    # 2) Wait for the popup and read the number
+    href = ""
+    text = ""
+    try:
+        sheet = page.locator("mat-bottom-sheet-container").first
+        sheet.wait_for(state="visible", timeout=timeout)
+
+        link = sheet.locator("a.phone").first
+        link.wait_for(state="visible", timeout=timeout)
+
+        href = (link.get_attribute("href") or "").strip()
+        text = (link.inner_text() or "").strip()
+        if dbg: print(f"[PHONE] href='{href}' text='{text}'", flush=True)
+    except PlaywrightTimeoutError:
+        if dbg: print("[PHONE] popup or phone link not visible", flush=True)
+        return None
+    except Exception as e:
+        if dbg: print(f"[PHONE] popup read error: {e}", flush=True)
+        return None
+    finally:
+        # Try to close the popup (best-effort)
+        try:
+            page.locator("[data-test-id='dialog-close-button'], button[data-test-id='dialog-close-button']").first.click(timeout=1500)
+        except Exception:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+    # 3) Normalize to E.164 (+7XXXXXXXXXX)
+    raw = href if href else text
+    if raw.startswith("tel:"):
+        raw = raw[4:]
+    digits = re.sub(r"\D", "", raw)
+
+    if not digits:
+        return None
+
+    # Common Russian cases
+    if len(digits) == 10 and digits.startswith("9"):           # e.g. 9XXXXXXXXX
+        digits = "7" + digits
+    if len(digits) == 11 and digits.startswith("8"):           # e.g. 8XXXXXXXXXX
+        digits = "7" + digits[1:]
+
+    if len(digits) == 11 and digits.startswith("7"):
+        e164 = "+" + digits
+    else:
+        # Fallback: at least return "+<digits>"
+        e164 = "+" + digits
+
+    if dbg: print(f"[PHONE] normalized -> {e164}", flush=True)
+    return e164
+
+
 def card_primary_url(card) -> str:
     """
     Return the absolute profile URL for a SERP card, or "" if not found.

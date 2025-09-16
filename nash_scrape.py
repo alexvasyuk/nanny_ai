@@ -31,6 +31,7 @@ from extractors import (
     extract_last_active_from_card,
     extract_location_from_profile,
     extract_travel_time_via_yandex,
+    extract_phone_number,
 )
 
 # Reuse session saved by nash_login.py
@@ -97,6 +98,7 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
     recs_raw        = extract_recommendations_from_profile(page)
     location_raw    = extract_location_from_profile(page)
     travel_time     = extract_travel_time_via_yandex(page, home_address=home_address)
+    phone_e164     = extract_phone_number(page, timeout=8000)
 
     # Current canonical URL:
     url_now = page.url
@@ -147,9 +149,10 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
         "education": education,
         "recommendations": recs,
         "score": score,
-        "explanation_bullets": " • ".join(reasons),
+        "explanation_bullets": "\n".join(f"• {r}" for r in reasons) if reasons else "",
         "location": location,
         "travel_time_min": travel_time,
+        "phone": phone_e164,
     }
 
 def scrape_recent_on_current_serp(
