@@ -28,6 +28,7 @@ from extractors import (
     extract_has_audio_from_profile,
     extract_has_fairy_tale_audio,
     extract_last_active_from_card,
+    extract_location_from_profile,
 )
 
 # Reuse session saved by nash_login.py
@@ -92,6 +93,7 @@ def scrape_open_profile(page, jd_text: str) -> dict:
     about_raw       = extract_about_from_profile(page)
     education_raw   = extract_education_from_profile(page)
     recs_raw        = extract_recommendations_from_profile(page)
+    location_raw        = extract_location_from_profile(page)
 
     # Current canonical URL:
     url_now = page.url
@@ -103,6 +105,7 @@ def scrape_open_profile(page, jd_text: str) -> dict:
     recs        = textify(recs_raw)
     age         = intify(age_raw)
     experience  = intify(experience_raw)
+    location = textify(location_raw)
 
     score, reasons = score_with_chatgpt(
         jd_text,

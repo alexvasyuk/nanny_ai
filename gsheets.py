@@ -17,7 +17,7 @@ NANNIES_HEADERS: List[str] = [
     "profile_id",
     "profile_url",
     "name",
-    "city",
+    "location", 
     "age",
     "experience_years",
     "about",

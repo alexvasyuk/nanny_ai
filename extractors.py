@@ -360,6 +360,24 @@ def extract_age_from_profile(page, timeout=3000) -> Optional[int]:
 
     return None
 
+def extract_location_from_profile(page, timeout: int = 4000) -> Optional[str]:
+    """
+    Reads the address text from the profile page:
+    <a class="show-address__link">Москва, Калужская</a>
+    Returns a cleaned string or None.
+    """
+    try:
+        sel = ".about__address .show-address__content a.show-address__link"
+        el = page.locator(sel).first
+        el.wait_for(state="attached", timeout=timeout)
+        txt = (el.inner_text() or "").strip()
+        # collapse nbsp and extra spaces
+        return " ".join(txt.replace("\xa0", " ").split()) or None
+    except PlaywrightTimeoutError:
+        return None
+    except Exception:
+        return None
+
 def extract_experience_from_profile(page, timeout=3000) -> Optional[int]:
     """
     Years of experience (Опыт).
