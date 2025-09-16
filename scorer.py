@@ -33,7 +33,7 @@ def make_openai_client() -> OpenAI:
 from typing import Optional
 import os, sys, re, json
 
-def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str], Optional[int]]:
+def score_with_chatgpt(jd_text: str, profile: dict, home_address: str,) -> tuple[int, list[str], Optional[int]]:
     """
     Return (score 1..10, reasons [3-5 bullets], travel_time minutes or None).
     """
@@ -49,7 +49,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str], Opt
         "Ты — строгий, прагматичный оценщик соответствия профиля вакансии. "
         "Не раскрывай ход размышлений, но предоставь краткие, предметные причины."
     )
-    
+
     user_msg = (
         "Оцени соответствие профиля требованиям вакансии и верни ЧИСТЫЙ JSON строго в формате:\n"
         '{ "score": <целое 1..10>, "reasons": ["...", "...", "..."], "Travel time": <целое минуты или null> }\n'
@@ -70,8 +70,9 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str], Opt
         "• Минимум: если один адрес за МКАД или локации на противоположных концах города — не меньше 60 мин.\n"
         "Если данных недостаточно — верни null.\n\n"
         "Входные данные:\n"
-        f"Job description:\n{jd_text}\n\n"
-        f"Profile (JSON):\n{profile_summary}\n\n"
+        f"Описание вакансии:\n{jd_text}\n\n"
+        f"Адрес работодателя:\n{home_address}\n\n"
+        f"Профиль няни (JSON):\n{profile_summary}\n\n"
         "Ответ — только JSON без пояснений."
     )
 

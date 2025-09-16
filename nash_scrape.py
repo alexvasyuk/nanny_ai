@@ -106,7 +106,7 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
     recs        = textify(recs_raw)
     age         = intify(age_raw)
     experience  = intify(experience_raw)
-    location = textify(location_raw)
+    location    = textify(location_raw)
 
     payload = {
         "url": url_now,
@@ -116,8 +116,7 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
         "about": about,
         "education": education,
         "recommendations": recs,
-        "location": location,
-        "home_address": home_address
+        "location": location, # nanny address
     }
 
     if no_openai:
@@ -125,6 +124,7 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
     else:
         score, reasons, travel_time = score_with_chatgpt(
             jd_text,
+            home_address, # my address
             payload,
         )
         if os.getenv("SCORER_DEBUG") == "1":
