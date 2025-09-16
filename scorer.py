@@ -8,6 +8,60 @@ load_dotenv()  # reads .env and sets variables into os.environ
 
 MODEL = "gpt-4o-mini"  # fast & cost-efficient
 
+def _apply_penalties(
+    fit_base: int,
+    age: Optional[int],
+    travel_time: Optional[int],
+    ai_p: Optional[float],
+) -> int:
+    """
+    Deterministic penalties:
+      - Age: <45 => +1; 55..64 => -2; 65+ => cap final score at 3
+      - Travel time (minutes): >60 => -1 (<=75), -2 (<=90), -3 (>90)
+      - AI prob: >0.50 => -1 (<=0.70), -2 (<=0.85), -3 (>0.85)
+      - Clamp 1..10; apply 65+ cap last
+    """
+    score = int(fit_base)
+    # Age
+    if age is not None:
+        if age < 45:
+            score += 1
+        elif 55 <= age <= 64:
+            score -= 2
+        elif age >= 65:
+            score -= 3
+    # Travel time
+    if travel_time is not None and travel_time > 60:
+        if travel_time <= 75:
+            score -= 1
+        elif travel_time <= 90:
+            score -= 2
+        else:
+            score -= 3
+    # AI prob
+    if ai_p is not None and ai_p > 0.50:
+        if ai_p <= 0.70:
+            score -= 1
+        elif ai_p <= 0.85:
+            score -= 2
+        else:
+            score -= 3
+    # Clamp
+    score = max(1, min(10, score))
+    return score
+
+
+def _safe_json_load(s: str) -> dict:
+    """Parse JSON; if model wrapped it with text, grab the first {...} block."""
+    import re, json
+    try:
+        return json.loads(s)
+    except Exception:
+        m = re.search(r"\{.*\}", s, flags=re.S)
+        if m:
+            return json.loads(m.group(0))
+        raise
+
 
 def make_openai_client() -> OpenAI:
     proxy = os.getenv("OPENAI_PROXY")  # e.g. socks5://127.0.0.1:1080  OR socks5h://…
@@ -41,69 +95,64 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
     if not api_key:
         return 0, ["error: OPENAI_API_KEY not set"], None
 
-    client = make_openai_client()
-
     profile_summary = json.dumps(profile, ensure_ascii=False, indent=2)
 
     system_msg = (
         "Ты — строгий, прагматичный оценщик соответствия профиля вакансии. "
-        "Не раскрывай ход размышлений, но предоставь краткие, предметные причины."
+        "Не раскрывай ход размышлений, верни только JSON."
     )
 
     user_msg = (
-        "Оцени соответствие профиля требованиям вакансии и верни ЧИСТЫЙ JSON строго в формате:\n"
-        '{ "score": <целое 1..10>, "reasons": ["...", "...", "..."] }\n'
-        "Требования к reasons: 5–10 пунктов, короткие и предметные. Отрази применённые штрафы/бонусы (с числами).\n\n"
-        "Шкала влияния на итоговый SCORE\n"
-        "Скорректируй итоговый 'score' (1..10, целое) по правилам ниже. Если данных нет — штраф не применяй.\n"
-        "1) AI-авторство раздела «О себе»: оцени вероятность p∈[0..1] что текст написан ИИ (клише, ровный стиль без конкретики и т.п.). "
-        "Если p>0.5 — считаем ИИ и штрафуем: 0.51–0.70 → −1; 0.71–0.85 → −2; >0.85 → −3. "
-        "Укажи p в reasons (например: \"О себе вероятно ИИ, p=0.78\").\n"
-        "3) Возраст: <45 → +1 (не выше 10); 45–54 → 0; 55–64 → −2; ≥65 → −3: установи верхнюю границу итогового score = 3.\n"
-        "Финальный score — после всех поправок.\n\n"
-        "Входные данные:\n"
+        "Верни ЧИСТЫЙ JSON:\n"
+        '{ "fit_base": <целое 1..10>, "ai_about_prob": <число 0..1>, "reasons": ["...", "..."] }\n\n'
+        "Правила:\n"
+        "- fit_base оценивает только соответствие профиля требованиям вакансии (НЕ учитывай возраст, время в пути и штрафы).\n"
+        "- ai_about_prob: оцени вероятность, что раздел «О себе» написан ИИ, по признакам (клише, ровный стиль без деталей, "
+        "шаблонные списки, отсутствие опечаток и т.п.).\n"
+        "  Выбирай одно из значений: 0.50, 0.70, 0.85, 0.95 (края диапазонов ≤0.50 / 0.51–0.70 / 0.71–0.85 / >0.85).\n"
+        "  Если «О себе» отсутствует или данных мало — 0.50.\n"
+        "- reasons: 5–8 коротких пунктов; укажи выбранный диапазон для ai_about_prob словами (например: "
+        "«О себе похоже на ИИ (диапазон 0.71–0.85)»).\n\n"
+        "Ответ — только JSON.\n\n"
         f"Описание вакансии:\n{jd_text}\n\n"
         f"Профиль няни (JSON):\n{profile_summary}\n\n"
-        "Ответ — только JSON без пояснений."
     )
 
     try:
+        client = make_openai_client()
         resp = client.chat.completions.create(
             model=MODEL,
-            temperature=0.2,
-            max_tokens=220,
+            temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
         )
-        raw = (resp.choices[0].message.content or "").strip()
+        content = resp.choices[0].message.content
+        data = _safe_json_load(content)
 
-        # Optional debug (enable by exporting SCORER_DEBUG=1)
-        if os.getenv("SCORER_DEBUG") == "1":
-            print(f"[SCORER] RAW:\n{raw}\n", file=sys.stderr)
-
-        # ---- Robust JSON extraction: grab the first {...} block ----
-        m = re.search(r"\{.*\}", raw, flags=re.S)
-        payload = m.group(0) if m else raw
-        try:
-            data = json.loads(payload)
-        except Exception:
-            # last-ditch: strip code fences/backticks if present, then try again
-            cleaned = re.sub(r"^```(?:json)?|```$", "", payload.strip(), flags=re.M)
-            data = json.loads(cleaned)
-
-        # Standard fields
-        score = int(data.get("score", 0))
+        fit_base = int(data.get("fit_base", 1))
+        ai_p = float(data.get("ai_about_prob", 0.5))
         reasons = data.get("reasons", [])
         if not isinstance(reasons, list):
-            reasons = []
-        reasons = [str(r).strip() for r in reasons if str(r).strip()]
+            reasons = [str(reasons)]
 
-        score = max(1, min(10, score)) if score else 0
-        if score == 0 and not reasons:
-            reasons = [f"error: invalid response: {raw!r}"]
-        return score, reasons
+        # Pull age and travel_time from profile
+        age = profile.get("age")
+        try:
+            age = int(age) if age is not None else None
+        except Exception:
+            age = None
+
+        travel_time = profile.get("travel_time") or profile.get("travel_time_min")
+        try:
+            travel_time = int(travel_time) if travel_time is not None else None
+        except Exception:
+            travel_time = None
+
+        final_score = _apply_penalties(fit_base, age, travel_time, ai_p)
+        return final_score, reasons
 
     except Exception as e:
         msg = getattr(e, "message", None) or str(e)
@@ -111,10 +160,11 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         etype = getattr(e, "type", None)
         if code:
             print(f"[SCORER] API error ({code}): {msg}", file=sys.stderr)
-            return 0, [f"error ({code}): {msg}"], None
+            return 0, [f"error ({code}): {msg}"]
         elif etype:
             print(f"[SCORER] API error ({etype}): {msg}", file=sys.stderr)
-            return 0, [f"error ({etype}): {msg}"], None
+            return 0, [f"error ({etype}): {msg}"]
         else:
             print(f"[SCORER] API error: {msg}", file=sys.stderr)
-            return 0, [f"error: {msg}"], None
+            return 0, [f"error: {msg}"]
+
