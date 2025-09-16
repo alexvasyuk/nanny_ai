@@ -82,7 +82,7 @@ def intify(x: Any) -> Optional[int]:
 def _trim(s, n=5000): 
     return s[:n] if isinstance(s, str) else s
 
-def scrape_open_profile(page, jd_text: str) -> dict:
+def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False) -> dict:
     """
     Assumes we are already on a profile page after clicking from SERP.
     Scrapes fields, scores via OpenAI, returns a row for CSV.
@@ -107,18 +107,21 @@ def scrape_open_profile(page, jd_text: str) -> dict:
     experience  = intify(experience_raw)
     location = textify(location_raw)
 
-    score, reasons = score_with_chatgpt(
-        jd_text,
-        {
-            "url": url_now,
-            "name": name,
-            "age": age,
-            "experience": experience,
-            "about": about,
-            "education": education,
-            "recommendations": recs,
-        },
-    )
+    if no_openai:
+        score, reasons = 0, ["skipped (no-openai)"]
+    else:
+        score, reasons = score_with_chatgpt(
+            jd_text,
+            {
+                "url": url_now,
+                "name": name,
+                "age": age,
+                "experience": experience,
+                "about": about,
+                "education": education,
+                "recommendations": recs,
+            },
+        )
 
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -133,6 +136,7 @@ def scrape_open_profile(page, jd_text: str) -> dict:
         "recommendations": recs,
         "score": score,
         "explanation_bullets": " • ".join(reasons),
+        "location": location,
     }
 
 def scrape_recent_on_current_serp(
@@ -142,7 +146,8 @@ def scrape_recent_on_current_serp(
     cutoff_hours: int = 48,
     cap: Optional[int] = None,
     seen_ids: Optional[set] = None,  
-    sink: Optional[list] = None,    
+    sink: Optional[list] = None, 
+    no_openai: bool = False,    
 ) -> int:
     """
     Single-SERP-page workflow:
@@ -205,7 +210,7 @@ def scrape_recent_on_current_serp(
     for j, c in enumerate(candidates, 1):
         page.goto(c["url"], wait_until="domcontentloaded")
 
-        row = scrape_open_profile(page, jd_text)
+        row = scrape_open_profile(page, jd_text, no_openai=no_openai)
         # audit fields from the SERP card
         row["last_active_raw"] = c["last_active_raw"]
         row["last_active_at"]  = c["last_active_at"].isoformat() if c["last_active_at"] else None
@@ -233,6 +238,7 @@ def scrape_recent_across_pages(
     cap_per_page: Optional[int] = None,
     max_pages: Optional[int] = None,
     seen_ids: Optional[set] = None,  
+    no_openai: bool = False,
 ) -> int:
     total_written = 0
     page_index = 1
@@ -248,6 +254,7 @@ def scrape_recent_across_pages(
             cap=cap_per_page, 
             seen_ids=seen_ids,
             sink=rows_accum,
+            no_openai=no_openai,  
         )
         total_written += written_this_page
 
@@ -282,6 +289,7 @@ def main():
     parser.add_argument("--max-pages", type=int, default=None)
     parser.add_argument("--cap-per-page", type=int, default=None)
     parser.add_argument("--new-only", action="store_true", help="Insert only new; don't update existing")
+    parser.add_argument("--no-openai", action="store_true", help="Skip scoring with OpenAI")
     args = parser.parse_args()
 
     if not STORAGE_STATE_PATH.exists():
@@ -313,6 +321,7 @@ def main():
             cap_per_page=args.cap_per_page,
             max_pages=args.max_pages,
             seen_ids=known_ids,
+            no_openai=args.no_openai, 
         )
         pages_scanned = "N/A" if args.max_pages is None else args.max_pages  # set a real count if you tracked it
 
