@@ -33,7 +33,7 @@ def make_openai_client() -> OpenAI:
 from typing import Optional
 import os, sys, re, json
 
-def score_with_chatgpt(jd_text: str, profile: dict, home_address: str,) -> tuple[int, list[str], Optional[int]]:
+def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
     """
     Return (score 1..10, reasons [3-5 bullets], travel_time minutes or None).
     """
@@ -52,29 +52,17 @@ def score_with_chatgpt(jd_text: str, profile: dict, home_address: str,) -> tuple
 
     user_msg = (
         "Оцени соответствие профиля требованиям вакансии и верни ЧИСТЫЙ JSON строго в формате:\n"
-        '{ "score": <целое 1..10>, "reasons": ["...", "...", "..."], "Travel time": <целое минуты или null> }\n'
+        '{ "score": <целое 1..10>, "reasons": ["...", "...", "..."] }\n'
         "Требования к reasons: 5–10 пунктов, короткие и предметные. Отрази применённые штрафы/бонусы (с числами).\n\n"
-
-        # Консервативная оценка пути
-        "Поле \"Travel time\" — консервативная оценка времени в пути от адреса няни до адреса семьи "
-        "(Москва/МО) по метро/наземному, дверь-в-дверь. Будь ПЕССИМИСТИЧЕН: если сомневаешься — выбирай верхнюю границу "
-        "и всегда округляй ВВЕРХ до 5 минут.\n"
-        "Правила: пешком+ожидание 15–20 мин суммарно; каждая пересадка 8–10 мин; возрастной коэффициент: +15% для 50–59, +25% для 60+.\n"
-        "Ориентиры: один район 25–35 мин; один радиус 35–55; через центр/1 пересадка 55–75; 2+ пересадок или край↔край 75–110; "
-        "Москва↔пригород 80–130. Минимум для «противоположных концов города» — не ниже 60.\n\n"
-
-        # Шкала влияния на итоговый SCORE
+        "Шкала влияния на итоговый SCORE\n"
         "Скорректируй итоговый 'score' (1..10, целое) по правилам ниже. Если данных нет — штраф не применяй.\n"
-        "1) AI-авторство раздела «О себе»: оцени вероятность p∈[0,1], что текст написан ИИ (клише, ровный стиль без конкретики и т.п.). "
+        "1) AI-авторство раздела «О себе»: оцени вероятность p∈[0..1] что текст написан ИИ (клише, ровный стиль без конкретики и т.п.). "
         "Если p>0.5 — считаем ИИ и штрафуем: 0.51–0.70 → −1; 0.71–0.85 → −2; >0.85 → −3. "
         "Укажи p в reasons (например: \"О себе вероятно ИИ, p=0.78\").\n"
-        "2) Время в пути (Travel time): если >60 мин, штрафуй: 61–75 → −1; 76–90 → −2; >90 → −3.\n"
-        "3) Возраст: <45 → +1 (не выше 10); 45–54 → 0; 55–64 → −2; ≥65 → -3: установи верхнюю границу итогового score = 3.\n"
-        "Применяй только разумные комбинации и не занижай/не завышай без оснований. Финальный score — после всех поправок.\n\n"
-
+        "3) Возраст: <45 → +1 (не выше 10); 45–54 → 0; 55–64 → −2; ≥65 → −3: установи верхнюю границу итогового score = 3.\n"
+        "Финальный score — после всех поправок.\n\n"
         "Входные данные:\n"
         f"Описание вакансии:\n{jd_text}\n\n"
-        f"Адрес работодателя:\n{home_address}\n\n"
         f"Профиль няни (JSON):\n{profile_summary}\n\n"
         "Ответ — только JSON без пояснений."
     )
@@ -112,24 +100,10 @@ def score_with_chatgpt(jd_text: str, profile: dict, home_address: str,) -> tuple
             reasons = []
         reasons = [str(r).strip() for r in reasons if str(r).strip()]
 
-        # Travel time: accept several key styles
-        tt = (
-            data.get("Travel time")
-            or data.get("travel_time")
-            or data.get("travelTime")
-            or data.get("travel time")
-        )
-        if isinstance(tt, str) and tt.isdigit():
-            travel_time = int(tt)
-        elif isinstance(tt, (int, float)):
-            travel_time = int(tt)
-        else:
-            travel_time = None
-
         score = max(1, min(10, score)) if score else 0
         if score == 0 and not reasons:
             reasons = [f"error: invalid response: {raw!r}"]
-        return score, reasons, travel_time
+        return score, reasons
 
     except Exception as e:
         msg = getattr(e, "message", None) or str(e)

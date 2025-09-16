@@ -30,6 +30,7 @@ from extractors import (
     extract_has_fairy_tale_audio,
     extract_last_active_from_card,
     extract_location_from_profile,
+    extract_travel_time_via_yandex,
 )
 
 # Reuse session saved by nash_login.py
@@ -95,9 +96,13 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
     education_raw   = extract_education_from_profile(page)
     recs_raw        = extract_recommendations_from_profile(page)
     location_raw    = extract_location_from_profile(page)
+    travel_time     = extract_travel_time_via_yandex(page, home_address=home_address)
 
     # Current canonical URL:
     url_now = page.url
+
+    if os.getenv("YAMAPS_DEBUG") == "1":
+        print(f"[YAMAPS] yandex_tt={travel_time} for {url_now}", flush=True)  # one-line debug
 
      # Coerce/clean
     name        = textify(name_raw)
@@ -120,9 +125,9 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
     }
 
     if no_openai:
-        score, reasons, travel_time = 0, ["skipped (no-openai)"], None
+        score, reasons = 0, ["skipped (no-openai)"]
     else:
-        score, reasons, travel_time = score_with_chatgpt(
+        score, reasons = score_with_chatgpt(
             jd_text,
             home_address, # my address
             payload,

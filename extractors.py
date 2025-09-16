@@ -3,11 +3,12 @@
 # --- LAST ACTIVE (RU) PARSER --------------------------------------------------
 from __future__ import annotations
 
-import re
+import os, re
 from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 from datetime import date, datetime, timezone, timedelta
 from typing import Optional, Tuple, List
 import time
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 PROFILE_URL_RE = re.compile(r".*/nyanya/[^/]+/\d+/?$")
 NBSP = u"\u00A0"
@@ -359,6 +360,143 @@ def extract_age_from_profile(page, timeout=3000) -> Optional[int]:
         pass
 
     return None
+
+def _force_masstransit(url: str) -> str:
+    """
+    Ensure Yandex Maps route URL uses public transport (masstransit) instead of car.
+    - Sets mode=routes and rtt=mt
+    """
+    if not url:
+        return url
+    u = urlparse(url)
+    q = parse_qs(u.query, keep_blank_values=True)
+    q["mode"] = ["routes"]     # make sure we land on routes UI
+    q["rtt"] = ["mt"]          # 'mt' = masstransit (public transport)
+    # remove any duplicates like 'auto'
+    new_q = urlencode(q, doseq=True)
+    return urlunparse(u._replace(query=new_q))
+
+def parse_ru_duration_to_min(txt: str) -> Optional[int]:
+    txt = (txt or "").replace("\u00a0", " ")
+
+    # Case 1: hours + minutes, e.g. "1 ч 5 мин"
+    m = re.search(r"(\d+)\s*ч(?:\D+?(\d+)\s*мин)?", txt)
+    if m:
+        h = int(m.group(1))
+        mm = int(m.group(2)) if m.group(2) else 0
+        return h * 60 + mm
+
+    # Case 2: minutes only, e.g. "40 мин"
+    m = re.search(r"(\d+)\s*мин", txt)
+    if m:
+        return int(m.group(1))
+
+    # Case 3: hours only, e.g. "1 ч"
+    m = re.search(r"(\d+)\s*ч\b", txt)
+    if m:
+        return int(m.group(1)) * 60
+
+    return None
+
+def _normalize_home_address(addr: str) -> str:
+    s = (addr or "").strip()
+    s = re.sub(r"^\s*г\.?\s*", "", s, flags=re.I)      # drop leading "г"/"г."
+    s = re.sub(r"\bд\.?\s*", "", s, flags=re.I)        # drop "д "
+    s = re.sub(r"\s+к\.?\s*", "к", s, flags=re.I)      # "к 2" -> "к2"
+    s = re.sub(r"\s+", " ", s).strip()
+    if not re.search(r"\bМосква\b", s, flags=re.I):
+        s = "Москва, " + s
+    return s
+
+
+def extract_travel_time_via_yandex(page, home_address: str = "", timeout: int = 20000) -> Optional[int]:
+    """
+    Open the Yandex route in a new tab, force public transport (rtt=mt),
+    route FROM nanny coords TO your home_address, read first route duration.
+    Returns minutes or None. Set YAMAPS_DEBUG=1 to see step logs.
+    """
+    dbg = os.getenv("YAMAPS_DEBUG") == "1"
+    try:
+        # 1) Grab the route link on the profile
+        a = page.locator('nn-map-route-link a.link, a.link.ng-star-inserted[href*="yandex.ru/maps"]').first
+        a.wait_for(state="attached", timeout=4000)
+        href = a.get_attribute("href") or ""
+        if dbg: print(f"[YAMAPS] raw href: {href}", flush=True)
+        if not href:
+            return None
+
+        # 2) Get nanny coords (prefer Google q=lat,lon; fallback rtext second point)
+        n_lat = n_lon = None
+        try:
+            g = page.locator(".about__address .show-address__content a.show-address__link").first
+            ghref = g.get_attribute("href") or ""
+            if dbg: print(f"[YAMAPS] google href: {ghref}", flush=True)
+            m = re.search(r"maps/\?q=([-\d\.]+),([-\d\.]+)", ghref)
+            if m:
+                n_lat, n_lon = map(float, m.groups())
+        except Exception as e:
+            if dbg: print(f"[YAMAPS] google coords failed: {e}", flush=True)
+
+        if n_lat is None or n_lon is None:
+            m = re.search(r"rtext=[^~]+~([-\d\.]+),([-\d\.]+)", href)
+            if m:
+                n_lat, n_lon = map(float, m.groups())
+        if dbg: print(f"[YAMAPS] nanny coords: {n_lat},{n_lon}", flush=True)
+        if n_lat is None or n_lon is None:
+            return None
+
+        # 3) Rewrite URL: mode=routes, rtt=mt, rtext=nanny~home; drop sticky params
+        u = urlparse(href)
+        q = parse_qs(u.query, keep_blank_values=True)
+        q["mode"] = ["routes"]
+        q["rtt"] = ["mt"]
+        q.pop("ruri", None)
+        q.pop("rll", None)
+        q.pop("rtm", None)
+
+        dest = _normalize_home_address(home_address) if home_address else ""
+        if dest:
+            q["rtext"] = [f"{n_lat},{n_lon}~{dest}"]
+
+        new_url = urlunparse(u._replace(query=urlencode(q, doseq=True)))
+        if dbg: print(f"[YAMAPS] URL => {new_url}", flush=True)
+
+        # 4) Open and wait for PT results to render
+        tab = page.context.new_page()
+        tab.goto(new_url, wait_until="domcontentloaded", timeout=timeout)
+        try:
+            tab.wait_for_selector(
+                '[class*="masstransit-route-snippet-view__route-duration"], '
+                '[class*="route-snippet-view__route-duration"]',
+                timeout=12000,
+            )
+        except Exception:
+            pass
+        tab.wait_for_timeout(1500)
+
+        # 5) Parse duration
+        mins = None
+        try:
+            sel = (
+                '[class*="masstransit-route-snippet-view__route-duration"], '
+                '[class*="route-snippet-view__route-duration"]'
+            )
+            txt = tab.locator(sel).first.inner_text(timeout=3000)
+            mins = parse_ru_duration_to_min(txt)
+            if dbg: print(f"[YAMAPS] snippet text: {txt} -> {mins} min", flush=True)
+        except Exception as e:
+            if dbg: print(f"[YAMAPS] snippet parse failed: {e}", flush=True)
+
+        if mins is None:
+            body = tab.locator("body").inner_text()
+            mins = parse_ru_duration_to_min(body)
+            if dbg: print(f"[YAMAPS] body fallback -> {mins} min", flush=True)
+
+        tab.close()
+        return mins
+    except Exception as e:
+        if dbg: print(f"[YAMAPS] error: {e}", flush=True)
+        return None
 
 def extract_location_from_profile(page, timeout: int = 4000) -> Optional[str]:
     """
