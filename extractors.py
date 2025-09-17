@@ -42,44 +42,132 @@ BASE = "https://nashanyanya.ru"
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 import re, os
 
+def _dismiss_blocking_overlays(page, dbg: bool = False) -> None:
+    """
+    Hides/removes Angular CDK overlays (coachmarks/tooltips/cookies) that can intercept clicks.
+    Keeps bottom-sheets intact.
+    """
+    try:
+        removed = page.evaluate("""
+        (() => {
+          const root = document.querySelector('.cdk-overlay-container');
+          if (!root) return 0;
+          let n = 0;
+
+          // Any coachmark / interview / tour / tooltip panes
+          for (const pane of root.querySelectorAll('.cdk-overlay-pane')) {
+            // Skip the phone bottom-sheet
+            if (pane.querySelector('mat-bottom-sheet-container')) continue;
+
+            // Known blockers
+            if (
+              pane.querySelector('.interview') ||
+              pane.querySelector('[data-tour], [data-coachmark], [role="dialog"]') ||
+              pane.querySelector('.mat-tooltip') ||
+              pane.querySelector('.cookie, .cookies')
+            ) {
+              pane.style.display = 'none';
+              pane.style.pointerEvents = 'none';
+              n++;
+            }
+          }
+          // Backdrops can also steal pointer events
+          for (const bd of root.querySelectorAll('.cdk-overlay-backdrop')) {
+            bd.style.pointerEvents = 'none';
+            n++;
+          }
+          return n;
+        })();
+        """)
+        if dbg: print(f"[PHONE] overlays hidden: {removed}", flush=True)
+    except Exception as e:
+        if dbg: print(f"[PHONE] overlay hide error: {e}", flush=True)
+
 def extract_phone_number(page, timeout: int = 8000) -> Optional[str]:
-    """
-    Clicks the green 'Телефон' button on the profile and reads the phone number
-    from the bottom-sheet popup (selector: a.phone). Returns E.164 (+7...) or None.
-    Set PHONES_DEBUG=1 for debug logs.
-    """
     dbg = os.getenv("PHONES_DEBUG") == "1"
 
-    # 1) Click the 'Телефон' button
+    # 1) Click the 'Телефон' button (fast + robust)
     try:
         btn = page.locator(
+            "aside .card__phone button, "
             "nn-show-resume-phone-button.card__phone button, "
             "nn-show-resume-phone-button button, "
-            ".card__phone button"
+            ".card__phone button, "
+            "button:has-text('Телефон')"
         ).first
+
+        # Make sure it really exists in the DOM and is visible (handlers attached)
         btn.wait_for(state="visible", timeout=timeout)
-        if dbg: print("[PHONE] Clicking phone button...", flush=True)
-        btn.click()
+
+        # Kill smooth scrolling so any scroll is instant
+        try:
+            page.evaluate(
+                "document.documentElement.style.scrollBehavior='auto';"
+                "document.body.style.scrollBehavior='auto';"
+            )
+        except Exception:
+            pass
+
+        # Dismiss any overlays that could intercept clicks
+        _dismiss_blocking_overlays(page, dbg=dbg)
+
+        # Bring into viewport instantly
+        try:
+            btn.scroll_into_view_if_needed(timeout=800)
+        except Exception:
+            try:
+                btn.evaluate("el => el.scrollIntoView({behavior:'auto',block:'center'})")
+            except Exception:
+                pass
+
+        # Attempt 1: normal click
+        if dbg: print("[PHONE] Clicking (normal)...", flush=True)
+        btn.click(timeout=1500)
+
     except PlaywrightTimeoutError:
         if dbg: print("[PHONE] phone button not found/visible", flush=True)
         return None
     except Exception as e:
-        if dbg: print(f"[PHONE] click error: {e}", flush=True)
-        return None
+        if dbg: print(f"[PHONE] normal click error: {e}", flush=True)
 
-    # 2) Wait for the popup and read the number
+    # 2) Wait for popup (with retries if needed)
     href = ""
     text = ""
     try:
         sheet = page.locator("mat-bottom-sheet-container").first
-        sheet.wait_for(state="visible", timeout=timeout)
+        try:
+            sheet.wait_for(state="visible", timeout=1500)
+        except PlaywrightTimeoutError:
+            # Retry path A: JS click (bypasses hit-testing/overlays)
+            try:
+                if dbg: print("[PHONE] sheet not visible; retry JS el.click()", flush=True)
+                btn.evaluate("el => el.click()")
+                sheet.wait_for(state="visible", timeout=1500)
+            except Exception:
+                pass
+
+        # If still no sheet, retry path B: force click
+        if not sheet.is_visible(timeout=200):
+            if dbg: print("[PHONE] sheet still not visible; retry force click", flush=True)
+            _dismiss_blocking_overlays(page, dbg=dbg)
+            try:
+                btn.click(force=True, timeout=1200)
+            except Exception as e2:
+                if dbg: print(f"[PHONE] force click failed: {e2}", flush=True)
+
+            try:
+                sheet.wait_for(state="visible", timeout=2000)
+            except PlaywrightTimeoutError:
+                if dbg: print("[PHONE] popup or phone link not visible", flush=True)
+                return None
 
         link = sheet.locator("a.phone").first
-        link.wait_for(state="visible", timeout=timeout)
+        link.wait_for(state="visible", timeout=1800)
 
         href = (link.get_attribute("href") or "").strip()
         text = (link.inner_text() or "").strip()
         if dbg: print(f"[PHONE] href='{href}' text='{text}'", flush=True)
+
     except PlaywrightTimeoutError:
         if dbg: print("[PHONE] popup or phone link not visible", flush=True)
         return None
@@ -96,7 +184,7 @@ def extract_phone_number(page, timeout: int = 8000) -> Optional[str]:
             except Exception:
                 pass
 
-    # 3) Normalize to E.164 (+7XXXXXXXXXX)
+    # --- 3) Normalize to E.164 (unchanged) ---
     raw = href if href else text
     if raw.startswith("tel:"):
         raw = raw[4:]
@@ -104,22 +192,16 @@ def extract_phone_number(page, timeout: int = 8000) -> Optional[str]:
 
     if not digits:
         return None
-
-    # Common Russian cases
-    if len(digits) == 10 and digits.startswith("9"):           # e.g. 9XXXXXXXXX
+    if len(digits) == 10 and digits.startswith("9"):
         digits = "7" + digits
-    if len(digits) == 11 and digits.startswith("8"):           # e.g. 8XXXXXXXXXX
+    if len(digits) == 11 and digits.startswith("8"):
         digits = "7" + digits[1:]
-
     if len(digits) == 11 and digits.startswith("7"):
         e164 = "+" + digits
     else:
-        # Fallback: at least return "+<digits>"
         e164 = "+" + digits
-
     if dbg: print(f"[PHONE] normalized -> {e164}", flush=True)
     return e164
-
 
 def card_primary_url(card) -> str:
     """
