@@ -4,3 +4,4 @@ rich==13.7.1
 openai
 gspread==5.12.4
 google-auth==2.33.0
+gspread-formatting

@@ -6,14 +6,14 @@ from typing import Dict, List, Tuple, Optional
 
 import gspread
 from gspread.cell import Cell
-
+from gspread_formatting import cellFormat, color, format_cell_range
 # ------------------------- Sheet & headers -------------------------
 
 NANNIES_SHEET = "Nannies"
 RUNS_SHEET    = "Runs"
 
 # Columns we write on insert
-NANNIES_HEADERS: List[str] = [
+MACHINE_NANNIES_HEADERS: List[str] = [
     "profile_id",
     "profile_url",
     "name",
@@ -31,12 +31,15 @@ NANNIES_HEADERS: List[str] = [
     "last_active_at",
     "first_seen_at",
     "last_seen_at",
-    # Human-editable (we DON'T overwrite these in updates)
+]
+
+HUMAN_NANNIES_HEADERS: List[str] = [
     "status",
-    "owner",
     "notes",
     "last_contacted_at",
 ]
+
+NANNIES_HEADERS: List[str] = MACHINE_NANNIES_HEADERS + HUMAN_NANNIES_HEADERS
 
 # For updates on existing rows, we ONLY touch these:
 MACHINE_UPDATE_COLS = [
@@ -48,6 +51,127 @@ MACHINE_UPDATE_COLS = [
     # "score",
     # "explanation_bullets",
 ]
+
+# gsheets.py
+
+def ensure_status_dropdown(ws):
+    """
+    Add/refresh a data-validation dropdown on the 'status' column.
+    Applies to all existing rows (row 2 .. last row).
+    """
+    try:
+        sheet_id = getattr(ws, "id", None) or ws._properties["sheetId"]
+        grid = ws._properties.get("gridProperties", {})
+        row_count = grid.get("rowCount", 5000)  # fallback if not present
+
+        # Edit the list as you like – ordered roughly by funnel
+        statuses = [
+            "Новый",
+            "Дубликат",
+            "Не соответствует критериям",
+            "Неверный номер",
+            "Не отвечает",
+            "Оставлено сообщение",
+            "Не заинтересован(а)",
+            "Заинтересован(а) – ждет скрининг",
+            "Скрининг назначен",
+            "Скрининг пройден – успешно",
+            "Скрининг пройден – отказ",
+            "Передано Саше/Вике",
+            "У Саши/Вики – интервью назначено",
+            "У Саши/Вики – интервью проведено – успешно",
+            "У Саши/Вики – интервью проведено – отказ",
+            "Сделано предложение",
+            "Нанят(а)",
+            "В ожидании",
+        ]
+
+        # Which column to target
+        col_idx0 = NANNIES_HEADERS.index("status")  # zero-based
+        req = {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,           # skip header row
+                    "endRowIndex": row_count,
+                    "startColumnIndex": col_idx0,
+                    "endColumnIndex": col_idx0 + 1,
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": s} for s in statuses],
+                    },
+                    "inputMessage": "Select a status",
+                    "strict": True,       # disallow values outside the list
+                    "showCustomUi": True, # show dropdown arrow
+                },
+            }
+        }
+
+        ws.spreadsheet.batch_update({"requests": [req]})
+    except Exception as e:
+        print(f"[SHEETS] Could not set status dropdown: {e}")
+
+
+def hide_columns(ws, headers_to_hide):
+    """
+    Hide columns by header name using gspread's batch_update (no googleapiclient).
+    """
+    try:
+        sheet_id = getattr(ws, "id", None) or ws._properties["sheetId"]
+
+        requests = []
+        for header in headers_to_hide:
+            if header in NANNIES_HEADERS:
+                col_idx = NANNIES_HEADERS.index(header)  # zero-based
+                requests.append({
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": col_idx,
+                            "endIndex": col_idx + 1,
+                        },
+                        "properties": {"hiddenByUser": True},
+                        "fields": "hiddenByUser",
+                    }
+                })
+
+        if requests:
+            ws.spreadsheet.batch_update({"requests": requests})
+    except Exception as e:
+        print(f"[SHEETS] Could not hide columns: {e}")
+
+def apply_column_colors(sheet):
+    """
+    Color-code columns so that machine-populated ones are gray
+    and user-populated ones stay white.
+    """
+    # Define which columns are machine vs user
+    machine_set =  set(MACHINE_NANNIES_HEADERS)
+    user_set = set(HUMAN_NANNIES_HEADERS)
+
+    # Read header row
+    header = sheet.row_values(1)
+
+    # Find column indexes (1-based for Google Sheets API)
+    machine_indexes = [i+1 for i, h in enumerate(header) if h in machine_set]
+    user_indexes = [i+1 for i, h in enumerate(header) if h in user_set]
+
+    # Define colors
+    gray_format = cellFormat(backgroundColor=color(0.9, 0.9, 0.9))  # light gray
+    white_format = cellFormat(backgroundColor=color(1, 1, 1))       # white
+
+    # Apply colors (rows 2–1000, change range if needed)
+    for col in machine_indexes:
+        col_letter = chr(64+col)  # 1->A, 2->B...
+        format_cell_range(sheet, f"{col_letter}2:{col_letter}1000", gray_format)
+
+    for col in user_indexes:
+        col_letter = chr(64+col)
+        format_cell_range(sheet, f"{col_letter}2:{col_letter}1000", white_format)
+
 
 def _client(sa_json: str) -> gspread.Client:
     return gspread.service_account(filename=sa_json)
@@ -85,6 +209,12 @@ def load_existing_ids(sa_json: str, spreadsheet_id: str):
     sh = _open_sheet(sa_json, spreadsheet_id)
     ws = _get_or_create_ws(sh, NANNIES_SHEET)
     header_map = _ensure_headers(ws, NANNIES_HEADERS)
+
+    #Formatting the sheet: hide some columns, ensure dropdown
+    hide_columns(ws, ["last_active_raw", "last_active_at", "first_seen_at", "last_seen_at"])
+    # after you ensure headers / open ws
+    ensure_status_dropdown(ws)
+
 
     id_col = header_map["profile_id"]
     url_col = header_map.get("profile_url")
@@ -199,8 +329,7 @@ def upsert_nannies(sa_json: str, spreadsheet_id: str, scraped_rows: List[dict], 
         # defaults for NEW rows
         r.setdefault("first_seen_at", now_iso)
         r.setdefault("last_seen_at", now_iso)
-        r.setdefault("status", "New")
-        r.setdefault("owner", "")
+        r.setdefault("status", "Новый")
         r.setdefault("notes", "")
         r.setdefault("last_contacted_at", "")
 
@@ -223,5 +352,6 @@ def upsert_nannies(sa_json: str, spreadsheet_id: str, scraped_rows: List[dict], 
 
     new_count = append_new_rows(ws, header_map, to_insert)
     upd_count = 0 if new_only else batch_update_machine_fields(ws, header_map, to_update_by_row)
+    apply_column_colors(ws)
     return new_count, upd_count
 
