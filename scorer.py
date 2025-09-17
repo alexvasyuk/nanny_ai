@@ -12,16 +12,17 @@ def _apply_penalties_with_details(
     fit_base: int,
     age: Optional[int],
     travel_time: Optional[int],
-    ai_p: Optional[float],
+    authenticity: Optional[float],
 ) -> tuple[int, list[tuple[str, int]]]:
     """
-    Same rules as _apply_penalties, but also returns a detailed adjustments log.
+    Deterministic adjustments + a multiplicative authenticity cap.
     Returns: (final_score, adjustments) where adjustments = [(label, delta), ...]
     - Clamp 1..10
     - 65+ cap to 3 is applied last (after clamp).
     """
     score = int(fit_base)
     adjustments: list[tuple[str, int]] = []
+
     def add(delta: int, label: str):
         nonlocal score
         if not delta:
@@ -35,48 +36,37 @@ def _apply_penalties_with_details(
         if age < 45:
             add(+1, "Возраст < 45: +1")
         elif 55 <= age <= 64:
-            add(-2, "Возраст 55–64: -1")
+            add(-1, "Возраст 55–64: -1")
         elif age >= 65:
-            add(-3, "Возраст ≥ 65: -2 (потолок 3)")
+            add(-2, "Возраст ≥ 65: -2 (потолок 3)")
             cap_to_3 = True
 
     # Travel time
     if travel_time is not None and travel_time > 60:
-        if travel_time <= 75:
+        if 61 <= travel_time <= 75:
             add(-1, "Время в пути 61–75 мин: -1")
-        elif travel_time <= 90:
+        elif 76 <= travel_time <= 90:
             add(-2, "Время в пути 76–90 мин: -2")
         else:
             add(-3, "Время в пути > 90 мин: -3")
 
-    # AI prob
-    if ai_p is not None and ai_p > 0.50:
-        if ai_p <= 0.70:
-            add(-1, f"«О себе» похоже на ИИ (p={ai_p:.2f}): -1")
-        elif ai_p <= 0.85:
-            add(-2, f"«О себе» похоже на ИИ (p={ai_p:.2f}): -2")
-        else:
-            add(-3, f"«О себе» похоже на ИИ (p={ai_p:.2f}): -3")
+    # Authenticity (separate lever, multiplicative cap 0.50..1.00)
+    if authenticity is not None:
+        try:
+            a = max(0.0, min(1.0, float(authenticity)))
+            factor = 0.5 + 0.5 * a               # 0.50..1.00
+            new_score = int(round(score * factor))
+            delta = new_score - score
+            adjustments.append((f"Аутентичность {a:.2f} → множитель ×{factor:.2f}", delta))
+            score = new_score
+        except Exception:
+            pass
 
-    # Clamp 1..10
+    # Clamp 1..10 and 65+ cap
     score = max(1, min(10, score))
     if cap_to_3:
         score = min(score, 3)
     return score, adjustments
-
-def _extract_ai_prob(reasons: List[str]) -> Optional[float]:
-    """
-    Tries to find 'p=0.78' (or similar) in reasons and return it as float.
-    Returns None if not found.
-    """
-    for r in reasons or []:
-        m = re.search(r"p\s*=\s*([0-9]*\.?[0-9]+)", r)
-        if m:
-            try:
-                return float(m.group(1))
-            except ValueError:
-                pass
-    return None
 
 def _safe_json_load(s: str) -> dict:
     """Parse JSON; if model wrapped it with text, grab the first {...} block."""
@@ -123,6 +113,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         return 0, ["error: OPENAI_API_KEY not set"], None
 
     profile_summary = json.dumps(profile, ensure_ascii=False, indent=2)
+    about_text = (profile.get("about") or profile.get("about_me") or profile.get("description") or "").strip()
 
     system_msg = (
         "Ты — строгий, прагматичный оценщик соответствия профиля вакансии. "
@@ -130,20 +121,31 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
     )
 
     user_msg = (
-        "Верни ЧИСТЫЙ JSON:\n"
-        '{ "fit_base": <целое 1..10>, "ai_about_prob": <число 0..1>, "reasons": ["...", "..."] }\n\n'
+        "Верни СТРОГО ЧИСТЫЙ JSON (без пояснений и текста вне JSON).\n\n"
+        "Твоя задача: оценить профиль няни для конкретной семьи по двум осям и дать отдельную оценку аутентичности текста «О себе».\n"
         "Правила:\n"
-        "- fit_base оценивает только соответствие профиля требованиям вакансии (НЕ учитывай возраст, время в пути и штрафы).\n"
-        "- ai_about_prob: оцени вероятность, что раздел «О себе» написан ИИ, по признакам (клише, ровный стиль без деталей, "
-        "шаблонные списки, отсутствие опечаток и т.п.).\n"
-        "  Выбирай одно из значений: 0.50, 0.70, 0.85, 0.95 (края диапазонов ≤0.50 / 0.51–0.70 / 0.71–0.85 / >0.85).\n"
-        "  Если «О себе» отсутствует или данных мало — 0.50.\n"
-        "- reasons: 5–8 коротких пунктов; укажи выбранный диапазон для ai_about_prob словами (например: "
-        "«О себе похоже на ИИ (диапазон 0.71–0.85)»).\n\n"
-        "Ответ — только JSON.\n\n"
-        f"Описание вакансии:\n{jd_text}\n\n"
-        f"Профиль няни (JSON):\n{profile_summary}\n\n"
+        "- Не додумывай факты: если чего-то нет в данных — укажи в missing_info.\n"
+        "- Все причины подкрепляй короткими цитатами (2–6 слов) из «О себе» в ««елочках»».\n"
+        "- Operational fit (0–10): используй И ФАКТЫ профиля, И текст «О себе». Оцени: (1) возрастные группы/опыт, (2) совпадение по графику, (3) задачи/скиллы, (4) безопасность/компетентность, (5) язык/коммуникация с семьёй.\n"
+        "- Human fit (0–10): опирайся на «О себе», но можешь учитывать объективные маркеры из фактов (длительные тенуры, повторные семьи, рекомендации, сертификаты). Оцени: ответственность/надёжность, доброжелательность/child-centered, любовь к детям, тёплая коммуникация.\n"
+        "- Authenticity (0.00–1.00): оцени ТОЛЬКО текст «О себе» по конкретике (возраст/примеры/рутины), первому лицу и опыту, балансу (границы/ограничения), внутренней согласованности и низкой клишированности.\n"
+        "- Combined fit (до коррекций) = 0.6*Operational + 0.4*Human.\n\n"
+        "Формат ответа — только этот JSON:\n"
+        "{\n"
+        '  "operational_fit": <число 0..10 с 1 знаком после запятой>,\n'
+        '  "human_fit": <число 0..10 с 1 знаком после запятой>,\n'
+        '  "authenticity": <число 0..1 с 2 знаками после запятой>,\n'
+        '  "combined_fit": <число 0..10 с 1 знаком после запятой>,\n'
+        '  "reasons_operational": ["<=5 коротких буллетов с «цитатами»"],\n'
+        '  "reasons_human": ["<=5 коротких буллетов с «цитатами»"],\n'
+        '  "reasons_authenticity": ["2–4 буллета про конкретику/клише/баланс с «цитатами»"],\n'
+        '  "missing_info": ["чего не хватает (график, задачи, рекомендации и т.д.)"]\n'
+        "}\n\n"
+        f"Описание вакансии (JD):\n{jd_text}\n\n"
+        f"Текст «О себе» няни:\n{about_text}\n\n"
+        f"Факты профиля (JSON):\n{profile_summary}\n"
     )
+
 
     try:
         client = make_openai_client()
@@ -159,11 +161,18 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         content = resp.choices[0].message.content
         data = _safe_json_load(content)
 
-        fit_base = int(data.get("fit_base", 1))
-        ai_p = float(data.get("ai_about_prob", 0.5))
-        reasons = data.get("reasons", [])
-        if not isinstance(reasons, list):
-            reasons = [str(reasons)]
+        operational_fit = float(data.get("operational_fit", 0.0))
+        human_fit       = float(data.get("human_fit", 0.0))
+        authenticity    = float(data.get("authenticity", 0.5))
+        combined_fit    = float(data.get("combined_fit", 0.0)) or (0.6*operational_fit + 0.4*human_fit)
+
+        reasons_operational   = data.get("reasons_operational", []) or []
+        reasons_human         = data.get("reasons_human", []) or []
+        reasons_authenticity  = data.get("reasons_authenticity", []) or []
+        missing_info          = data.get("missing_info", []) or []
+
+        # Базовая оценка, которая уйдёт в корректировки
+        fit_base = max(0.0, min(10.0, combined_fit))
 
         # Pull age and travel_time from profile
         age = profile.get("age")
@@ -178,13 +187,26 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         except Exception:
             travel_time = None
     
-        final_score, adjustments = _apply_penalties_with_details(fit_base, age, travel_time, ai_p)
+        final_score, adjustments = _apply_penalties_with_details(
+            int(round(fit_base)), age, travel_time, authenticity
+        )
 
         # Build structured bullets:
         bullets: list[str] = []
-        bullets.append(f"Базовая оценка: {fit_base}")
-        for r in reasons[:8]:  # оставляем до 8, обычно 4–7
+
+        bullets.append(f"Операционный фит: {operational_fit:.1f}")
+        for r in reasons_operational[:4]:
             bullets.append(f"• {r}")
+
+        bullets.append(f"Человеческий фит: {human_fit:.1f}")
+        for r in reasons_human[:4]:
+            bullets.append(f"• {r}")
+
+        bullets.append(f"Аутентичность «О себе»: {authenticity:.2f}")
+        for r in reasons_authenticity[:3]:
+            bullets.append(f"• {r}")
+
+        bullets.append(f"Комбинированный (до корректировок): {fit_base:.1f}")
 
         bullets.append("Корректировки:")
         if adjustments:
@@ -193,9 +215,14 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         else:
             bullets.append("• нет")
 
-        bullets.append(f"Итоговая оценка: {final_score}")
+        if missing_info:
+            bullets.append("Чего не хватает:")
+            for m in missing_info[:3]:
+                bullets.append(f"• {m}")
 
+        bullets.append(f"Итоговая оценка: {final_score}")
         return final_score, bullets
+
 
     except Exception as e:
         msg = getattr(e, "message", None) or str(e)
