@@ -1,55 +1,82 @@
 # scorer.py
 import os, re, sys, json, httpx
 from openai import OpenAI
-from typing import Optional
+from typing import List, Tuple, Optional
 
 from dotenv import load_dotenv
 load_dotenv()  # reads .env and sets variables into os.environ
 
 MODEL = "gpt-4o-mini"  # fast & cost-efficient
 
-def _apply_penalties(
+def _apply_penalties_with_details(
     fit_base: int,
     age: Optional[int],
     travel_time: Optional[int],
     ai_p: Optional[float],
-) -> int:
+) -> tuple[int, list[tuple[str, int]]]:
     """
-    Deterministic penalties:
-      - Age: <45 => +1; 55..64 => -2; 65+ => cap final score at 3
-      - Travel time (minutes): >60 => -1 (<=75), -2 (<=90), -3 (>90)
-      - AI prob: >0.50 => -1 (<=0.70), -2 (<=0.85), -3 (>0.85)
-      - Clamp 1..10; apply 65+ cap last
+    Same rules as _apply_penalties, but also returns a detailed adjustments log.
+    Returns: (final_score, adjustments) where adjustments = [(label, delta), ...]
+    - Clamp 1..10
+    - 65+ cap to 3 is applied last (after clamp).
     """
     score = int(fit_base)
+    adjustments: list[tuple[str, int]] = []
+    def add(delta: int, label: str):
+        nonlocal score
+        if not delta:
+            return
+        score += int(delta)
+        adjustments.append((label, int(delta)))
+
     # Age
+    cap_to_3 = False
     if age is not None:
         if age < 45:
-            score += 1
+            add(+1, "Возраст < 45: +1")
         elif 55 <= age <= 64:
-            score -= 2
+            add(-2, "Возраст 55–64: -1")
         elif age >= 65:
-            score -= 3
+            add(-3, "Возраст ≥ 65: -2 (потолок 3)")
+            cap_to_3 = True
+
     # Travel time
     if travel_time is not None and travel_time > 60:
         if travel_time <= 75:
-            score -= 1
+            add(-1, "Время в пути 61–75 мин: -1")
         elif travel_time <= 90:
-            score -= 2
+            add(-2, "Время в пути 76–90 мин: -2")
         else:
-            score -= 3
+            add(-3, "Время в пути > 90 мин: -3")
+
     # AI prob
     if ai_p is not None and ai_p > 0.50:
         if ai_p <= 0.70:
-            score -= 1
+            add(-1, f"«О себе» похоже на ИИ (p={ai_p:.2f}): -1")
         elif ai_p <= 0.85:
-            score -= 2
+            add(-2, f"«О себе» похоже на ИИ (p={ai_p:.2f}): -2")
         else:
-            score -= 3
-    # Clamp
-    score = max(1, min(10, score))
-    return score
+            add(-3, f"«О себе» похоже на ИИ (p={ai_p:.2f}): -3")
 
+    # Clamp 1..10
+    score = max(1, min(10, score))
+    if cap_to_3:
+        score = min(score, 3)
+    return score, adjustments
+
+def _extract_ai_prob(reasons: List[str]) -> Optional[float]:
+    """
+    Tries to find 'p=0.78' (or similar) in reasons and return it as float.
+    Returns None if not found.
+    """
+    for r in reasons or []:
+        m = re.search(r"p\s*=\s*([0-9]*\.?[0-9]+)", r)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                pass
+    return None
 
 def _safe_json_load(s: str) -> dict:
     """Parse JSON; if model wrapped it with text, grab the first {...} block."""
@@ -150,9 +177,25 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
             travel_time = int(travel_time) if travel_time is not None else None
         except Exception:
             travel_time = None
+    
+        final_score, adjustments = _apply_penalties_with_details(fit_base, age, travel_time, ai_p)
 
-        final_score = _apply_penalties(fit_base, age, travel_time, ai_p)
-        return final_score, reasons
+        # Build structured bullets:
+        bullets: list[str] = []
+        bullets.append(f"Базовая оценка: {fit_base}")
+        for r in reasons[:8]:  # оставляем до 8, обычно 4–7
+            bullets.append(f"• {r}")
+
+        bullets.append("Корректировки:")
+        if adjustments:
+            for label, delta in adjustments:
+                bullets.append(f"• {label} ({delta:+d})")
+        else:
+            bullets.append("• нет")
+
+        bullets.append(f"Итоговая оценка: {final_score}")
+
+        return final_score, bullets
 
     except Exception as e:
         msg = getattr(e, "message", None) or str(e)

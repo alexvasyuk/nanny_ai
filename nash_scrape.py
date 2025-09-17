@@ -149,7 +149,7 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
         "education": education,
         "recommendations": recs,
         "score": score,
-        "explanation_bullets": "\n".join(f"• {r}" for r in reasons) if reasons else "",
+        "explanation_bullets": "\n".join(reasons) if reasons else "",
         "location": location,
         "travel_time_min": travel_time,
         "phone": phone_e164,
