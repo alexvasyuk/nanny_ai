@@ -6,7 +6,7 @@ from typing import List, Tuple, Optional
 from dotenv import load_dotenv
 load_dotenv()  # reads .env and sets variables into os.environ
 
-MODEL = "gpt-4o-mini"  # fast & cost-efficient
+MODEL = "gpt-5"  
 
 def _apply_penalties_with_details(
     fit_base: int,
@@ -160,7 +160,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         client = make_openai_client()
         resp = client.chat.completions.create(
             model=MODEL,
-            temperature=0,
+            temperature=0.1,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_msg},
