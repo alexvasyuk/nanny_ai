@@ -57,23 +57,27 @@ def _apply_penalties_with_details(
     if has_recommendations:
         add(+1, "Есть рекомендации: +1")
 
-    # NEW bonuses (each +0.5)
-    if has_audio:
-        add(+0.5, "Есть голосовое сообщение: +0.5")
-    if has_fairy_tale_audio:
-        add(+0.5, "Есть аудиосказки: +0.5")
+    if has_audio or has_fairy_tale_audio:
+        add(+1, "Есть голосовое сообщение: +1")
 
-    # Authenticity (separate lever, multiplicative cap 0.50..1.00)
+    # Authenticity (hinged cap):
+    # - No penalty at/above 0.80  → factor = 1.00
+    # - Linear, mild penalty below 0.80
+    #   floor = 0.60 at a=0.00, so e.g.:
+    #   a=0.79 → ×0.995, a=0.60 → ×0.90, a=0.50 → ×0.85
     if authenticity is not None:
         try:
             a = max(0.0, min(1.0, float(authenticity)))
-            factor = 0.5 + 0.5 * a               # 0.50..1.00
-            new_score = int(round(score * factor))
-            delta = new_score - score
-            adjustments.append((f"Аутентичность {a:.2f} → множитель ×{factor:.2f}", delta))
-            score = new_score
+            if a >= 0.80:
+                factor = 1.00
+            else:
+                factor = 0.60 + 0.50 * a   # line from (a=0 → 0.60) to (a=0.80 → 1.00)
+            prev = score
+            score = score * factor
+            adjustments.append((f"Аутентичность {a:.2f} → множитель ×{factor:.2f}", score - prev))
         except Exception:
             pass
+
 
     # Clamp 1..10 and 65+ cap
     score = max(1, min(10, score))

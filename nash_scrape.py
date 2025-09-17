@@ -38,7 +38,7 @@ from extractors import (
 STORAGE_STATE_PATH = Path("data/session.json")
 
 # Your encoded SERP URL (with hasAudioMessage=true)
-SERP_URL = 'https://nashanyanya.ru/nyanya/moscow;query=%7B%22liveInOuts%22:%5B2%5D,%22employments%22:%5B1,2%5D,%22workingExperienceAges%22:%5B4,5,6%5D,%22yearExperience%22:3,%22ageGroups%22:%5B3,4%5D,%22notSmoke%22:true,%22withPhoto%22:true,%22sortBy%22:%22Activity%22,%22sortOrder%22:1%7D'
+SERP_URL = 'https://nashanyanya.ru/nyanya/moscow;query=%7B%22yearExperience%22:3,%22employments%22:%5B1,2%5D,%22liveInOuts%22:%5B2%5D,%22notSmoke%22:true,%22sortOrder%22:1,%22sortBy%22:%22Activity%22,%22workingExperienceAges%22:%5B4,5,6%5D,%22ageGroups%22:%5B3,4%5D,%22withPhoto%22:true,%22hasAudioMessage%22:true%7D'
 
 # Where to write results
 OUTPUT_CSV = Path("data/nannies.csv")
