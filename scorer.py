@@ -14,6 +14,8 @@ def _apply_penalties_with_details(
     travel_time: Optional[int],
     authenticity: Optional[float],
     has_recommendations: Optional[bool] = None,
+    has_audio: Optional[bool] = None,            
+    has_fairy_tale_audio: Optional[bool] = None, 
 ) -> tuple[int, list[tuple[str, int]]]:
     """
     Deterministic adjustments + a multiplicative authenticity cap.
@@ -54,6 +56,12 @@ def _apply_penalties_with_details(
     # NEW: recommendations bonus (+1 if any)
     if has_recommendations:
         add(+1, "Есть рекомендации: +1")
+
+    # NEW bonuses (each +0.5)
+    if has_audio:
+        add(+0.5, "Есть голосовое сообщение: +0.5")
+    if has_fairy_tale_audio:
+        add(+0.5, "Есть аудиосказки: +0.5")
 
     # Authenticity (separate lever, multiplicative cap 0.50..1.00)
     if authenticity is not None:
@@ -203,12 +211,19 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         else:
             has_recs = False
         
+        # NEW: pull booleans from the profile dict (use your extractor keys)
+        has_audio = bool(profile.get("has_audio") or profile.get("has_audio_message"))
+        has_fairy = bool(profile.get("has_fairy_tale_audio") or profile.get("has_fairy_tale"))
+
+        # call penalties helper (add the new args)
         final_score, adjustments = _apply_penalties_with_details(
             int(round(fit_base)),
             age,
             travel_time,
             authenticity,
-            has_recommendations=has_recs,   # <-- NEW
+            has_recommendations=has_recs,
+            has_audio=has_audio,                         
+            has_fairy_tale_audio=has_fairy,              
         )
 
         # Build structured bullets:
@@ -231,7 +246,9 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         bullets.append("Корректировки:")
         if adjustments:
             for label, delta in adjustments:
-                bullets.append(f"• {label} ({delta:+d})")
+                # show integers without .0, show halves with one decimal
+                delta_str = f"{delta:+.1f}" if abs(delta % 1) >= 1e-9 else f"{int(delta):+d}"
+                bullets.append(f"• {label} ({delta_str})")
         else:
             bullets.append("• нет")
 
