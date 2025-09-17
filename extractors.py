@@ -689,14 +689,19 @@ def extract_recommendations_from_profile(page, timeout: int = 1200):
     Return list[str] or None. Never blocks the crawl if the section is absent.
     """
     sel = "nn-resume-recommendation-list"
-    cont = page.locator(sel)
+    cont = page.locator(sel).first
     try:
-        # 'attached' is enough; some blocks are hidden by default
-        cont.wait_for(state="attached", timeout=timeout)
+        cont.wait_for(state="attached", timeout=timeout)  # visible not required
     except PlaywrightTimeoutError:
         return None
 
-    items = cont.locator("li, nn-resume-recommendation-item")
+    # Primary: each recommendation’s body
+    items = cont.locator(".recomm__content")
+
+    # Fallbacks for older variants (your previous logic)
+    if items.count() == 0:
+        items = cont.locator(".recomm__item, li, nn-resume-recommendation-item")
+
     n = items.count()
     if n == 0:
         return None
@@ -704,11 +709,15 @@ def extract_recommendations_from_profile(page, timeout: int = 1200):
     out = []
     for i in range(min(n, 12)):
         try:
-            t = items.nth(i).inner_text(timeout=500).strip()
+            t = (items.nth(i).inner_text(timeout=800) or "").strip()
+            # Optional: drop leading "РЕКОМЕНДАЦИЯ" label if present
+            t = re.sub(r"^\s*РЕКОМЕНДАЦИЯ\s*", "", t, flags=re.IGNORECASE)
+            t = _clean_para(t)  # reuse your normalizer
             if t:
                 out.append(t)
         except Exception:
             continue
+
     return out or None
 
 def extract_has_audio_from_profile(page, timeout: int = 4000) -> bool:

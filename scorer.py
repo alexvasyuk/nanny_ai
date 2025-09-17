@@ -13,6 +13,7 @@ def _apply_penalties_with_details(
     age: Optional[int],
     travel_time: Optional[int],
     authenticity: Optional[float],
+    has_recommendations: Optional[bool] = None,
 ) -> tuple[int, list[tuple[str, int]]]:
     """
     Deterministic adjustments + a multiplicative authenticity cap.
@@ -49,6 +50,10 @@ def _apply_penalties_with_details(
             add(-2, "Время в пути 76–90 мин: -2")
         else:
             add(-3, "Время в пути > 90 мин: -3")
+    
+    # NEW: recommendations bonus (+1 if any)
+    if has_recommendations:
+        add(+1, "Есть рекомендации: +1")
 
     # Authenticity (separate lever, multiplicative cap 0.50..1.00)
     if authenticity is not None:
@@ -114,6 +119,9 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
 
     profile_summary = json.dumps(profile, ensure_ascii=False, indent=2)
     about_text = (profile.get("about") or profile.get("about_me") or profile.get("description") or "").strip()
+    recs = profile.get("recommendations") or []
+    recs_text = "\n".join(f"- {r.strip()}" for r in recs[:5]) or "—"
+
 
     system_msg = (
         "Ты — строгий, прагматичный оценщик соответствия профиля вакансии. "
@@ -125,7 +133,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         "Твоя задача: оценить профиль няни для конкретной семьи по двум осям и дать отдельную оценку аутентичности текста «О себе».\n"
         "Правила:\n"
         "- Не додумывай факты: если чего-то нет в данных — укажи в missing_info.\n"
-        "- Все причины подкрепляй короткими цитатами (2–6 слов) из «О себе» в ««елочках»».\n"
+        "- Все причины подкрепляй короткими цитатами (2–6 слов) из «О себе» ИЛИ из текста рекомендаций. Если цитата из рекомендации, пометь её как [рек.]: «…». \n"
         "- Operational fit (0–10): используй И ФАКТЫ профиля, И текст «О себе». Оцени: (1) возрастные группы/опыт, (2) совпадение по графику, (3) задачи/скиллы, (4) безопасность/компетентность, (5) язык/коммуникация с семьёй.\n"
         "- Human fit (0–10): опирайся на «О себе», но можешь учитывать объективные маркеры из фактов (длительные тенуры, повторные семьи, рекомендации, сертификаты). Оцени: ответственность/надёжность, доброжелательность/child-centered, любовь к детям, тёплая коммуникация.\n"
         "- Authenticity (0.00–1.00): оцени ТОЛЬКО текст «О себе» по конкретике (возраст/примеры/рутины), первому лицу и опыту, балансу (границы/ограничения), внутренней согласованности и низкой клишированности.\n"
@@ -144,6 +152,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         f"Описание вакансии (JD):\n{jd_text}\n\n"
         f"Текст «О себе» няни:\n{about_text}\n\n"
         f"Факты профиля (JSON):\n{profile_summary}\n"
+        f"Рекомендации (текст, если есть):\n{recs_text}\n\n"
     )
 
 
@@ -187,8 +196,20 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         except Exception:
             travel_time = None
     
+        recs = profile.get("recommendations") or profile.get("recs") or []
+        if isinstance(recs, (list, tuple)):
+            has_recs = len(recs) > 0
+        elif isinstance(recs, str):
+            has_recs = bool(recs.strip())
+        else:
+            has_recs = False
+        
         final_score, adjustments = _apply_penalties_with_details(
-            int(round(fit_base)), age, travel_time, authenticity
+            int(round(fit_base)),
+            age,
+            travel_time,
+            authenticity,
+            has_recommendations=has_recs,   # <-- NEW
         )
 
         # Build structured bullets:
