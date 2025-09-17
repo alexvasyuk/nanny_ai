@@ -8,6 +8,7 @@ import gspread
 from gspread.cell import Cell
 from gspread_formatting import cellFormat, color, format_cell_range
 from gspread.utils import rowcol_to_a1
+
 # ------------------------- Sheet & headers -------------------------
 
 NANNIES_SHEET = "Nannies"
@@ -52,6 +53,31 @@ MACHINE_UPDATE_COLS = [
     # "score",
     # "explanation_bullets",
 ]
+
+def _col_letter(col_idx: int) -> str:
+    # 1 -> "A", 27 -> "AA"
+    return "".join(ch for ch in rowcol_to_a1(1, col_idx) if ch.isalpha())
+
+def sort_by_header(ws, header_name: str, desc: bool = True, header_row: int = 1) -> bool:
+    """
+    Sort rows (below the header) by a column identified by its header text.
+    Returns True if sorted, False if header not found.
+
+    ws: gspread worksheet
+    header_name: e.g. "score"
+    desc: True for Z→A (highest first)
+    header_row: row index of the header (1-based)
+    """
+    header = ws.row_values(header_row)
+    if header_name not in header:
+        return False
+
+    col_idx = header.index(header_name) + 1
+    last_col_letter = _col_letter(len(header))
+    rng = f"A{header_row + 1}:{last_col_letter}{ws.row_count}"  # keep header out of the sort
+    order = "des" if desc else "asc"
+    ws.sort((col_idx, order), range=rng)
+    return True
 
 
 def bold_columns_by_headers(ws, header_names: list[str] = None):
@@ -365,5 +391,7 @@ def upsert_nannies(sa_json: str, spreadsheet_id: str, scraped_rows: List[dict], 
     new_count = append_new_rows(ws, header_map, to_insert)
     upd_count = 0 if new_only else batch_update_machine_fields(ws, header_map, to_update_by_row)
     apply_column_colors(ws)
+    # sort by score descending
+    sort_by_header(ws, "score", desc=True)
     return new_count, upd_count
 
