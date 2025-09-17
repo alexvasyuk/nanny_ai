@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple, Optional
 import gspread
 from gspread.cell import Cell
 from gspread_formatting import cellFormat, color, format_cell_range
+from gspread.utils import rowcol_to_a1
 # ------------------------- Sheet & headers -------------------------
 
 NANNIES_SHEET = "Nannies"
@@ -52,7 +53,16 @@ MACHINE_UPDATE_COLS = [
     # "explanation_bullets",
 ]
 
-# gsheets.py
+
+def bold_columns_by_headers(ws, header_names: list[str] = None):
+    header = ws.row_values(1)
+    if not header_names:
+        return  # nothing to do
+    for name in header_names:
+        if name in header:
+            col_idx = header.index(name) + 1
+            col_letter = "".join(ch for ch in rowcol_to_a1(1, col_idx) if ch.isalpha())
+            ws.format(f"{col_letter}:{col_letter}", {"textFormat": {"bold": True}})
 
 def ensure_status_dropdown(ws):
     """
@@ -214,6 +224,8 @@ def load_existing_ids(sa_json: str, spreadsheet_id: str):
     hide_columns(ws, ["last_active_raw", "last_active_at", "first_seen_at", "last_seen_at"])
     # after you ensure headers / open ws
     ensure_status_dropdown(ws)
+    bold_columns_by_headers(ws, ["score"])  # adjust to your exact header text
+
 
 
     id_col = header_map["profile_id"]
