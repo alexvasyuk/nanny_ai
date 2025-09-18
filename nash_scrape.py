@@ -85,7 +85,14 @@ def intify(x: Any) -> Optional[int]:
 def _trim(s, n=5000): 
     return s[:n] if isinstance(s, str) else s
 
-def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_address: str = "") -> dict:
+def scrape_open_profile(
+    page,
+    jd_text: str,
+    *,
+    no_openai: bool = False,
+    home_address: str = "",
+    no_phones: bool = False,         
+) -> dict:
     """
     Assumes we are already on a profile page after clicking from SERP.
     Scrapes fields, scores via OpenAI, returns a row for CSV.
@@ -98,9 +105,14 @@ def scrape_open_profile(page, jd_text: str, *, no_openai: bool = False, home_add
     recs_raw        = extract_recommendations_from_profile(page)
     location_raw    = extract_location_from_profile(page)
     travel_time     = extract_travel_time_via_yandex(page, home_address=home_address)
-    phone_e164      = extract_phone_number(page, timeout=8000)
     has_audio       = extract_has_audio_from_profile(page)
     has_fairy_tale_audio = extract_has_fairy_tale_audio(page)
+    if no_phones:
+        phone_e164 = None
+        if os.getenv("PHONES_DEBUG") == "1":
+            print("[PHONE] skipping (flag --no-phones)", flush=True)
+    else:
+        phone_e164 = extract_phone_number(page, timeout=8000)
 
 
     # Current canonical URL:
@@ -169,7 +181,8 @@ def scrape_recent_on_current_serp(
     seen_ids: Optional[set] = None,  
     sink: Optional[list] = None, 
     no_openai: bool = False,
-    home_address: str = "",       
+    home_address: str = "",
+    no_phones: bool = False,       
 ) -> int:
     """
     Single-SERP-page workflow:
@@ -197,7 +210,7 @@ def scrape_recent_on_current_serp(
         is_recent = bool(last_dt and last_dt >= cutoff_dt)
         print(
             f"[{i+1}/{total}] {url} | last_active_raw={raw!r} | "
-            f"parsed={last_dt.isoformat() if last_dt else None} | recent_48h={is_recent}",
+            f"parsed={last_dt.isoformat() if last_dt else None} | recent_{cutoff_hours}h={is_recent}",
             flush=True
         )
 
@@ -232,7 +245,13 @@ def scrape_recent_on_current_serp(
     for j, c in enumerate(candidates, 1):
         page.goto(c["url"], wait_until="domcontentloaded")
 
-        row = scrape_open_profile(page, jd_text, no_openai=no_openai, home_address=home_address)
+        row = scrape_open_profile(
+            page, 
+            jd_text, 
+            no_openai=no_openai, 
+            home_address=home_address,
+            no_phones=no_phones,
+        )
         # audit fields from the SERP card
         row["last_active_raw"] = c["last_active_raw"]
         row["last_active_at"]  = c["last_active_at"].isoformat() if c["last_active_at"] else None
@@ -262,6 +281,7 @@ def scrape_recent_across_pages(
     seen_ids: Optional[set] = None,  
     no_openai: bool = False,
     home_address: str = "",
+    no_phones: bool = False,
 ) -> int:
     total_written = 0
     page_index = 1
@@ -278,7 +298,8 @@ def scrape_recent_across_pages(
             seen_ids=seen_ids,
             sink=rows_accum,
             no_openai=no_openai,
-            home_address=home_address,     
+            home_address=home_address,  
+            no_phones=no_phones,
         )
         total_written += written_this_page
 
@@ -320,6 +341,11 @@ def main():
         default=os.getenv("HOME_ADDRESS", ""),
         help="Your address for travel-time estimate (quote if it has spaces)",
     )
+    parser.add_argument(
+        "--no-phones",
+        action="store_true",
+        help="Skip clicking the 'Телефон' button and do not scrape phone numbers."
+    )
     args = parser.parse_args()
 
     if not STORAGE_STATE_PATH.exists():
@@ -353,6 +379,7 @@ def main():
             seen_ids=known_ids,
             no_openai=args.no_openai, 
             home_address=args.home_address,
+            no_phones=args.no_phones,
         )
         pages_scanned = "N/A" if args.max_pages is None else args.max_pages  # set a real count if you tracked it
 
