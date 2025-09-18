@@ -121,13 +121,13 @@ def make_openai_client() -> OpenAI:
 from typing import Optional
 import os, sys, re, json
 
-def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
+def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str], bool]:
     """
     Return (score 1..10, reasons [3-5 bullets], travel_time minutes or None).
     """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        return 0, ["error: OPENAI_API_KEY not set"], None
+        return 0, ["error: OPENAI_API_KEY not set"], False
 
     profile_summary = json.dumps(profile, ensure_ascii=False, indent=2)
     about_text = (profile.get("about") or profile.get("about_me") or profile.get("description") or "").strip()
@@ -150,12 +150,15 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         "- Human fit (0–10): опирайся на «О себе», но можешь учитывать объективные маркеры из фактов (длительные тенуры, повторные семьи, рекомендации, сертификаты). Оцени: ответственность/надёжность, доброжелательность/child-centered, любовь к детям, тёплая коммуникация.\n"
         "- Authenticity (0.00–1.00): оцени ТОЛЬКО текст «О себе» по конкретике (возраст/примеры/рутины), первому лицу и опыту, балансу (границы/ограничения), внутренней согласованности и низкой клишированности.\n"
         "- Combined fit (до коррекций) = 0.6*Operational + 0.4*Human.\n\n"
+        "- Пол/гендер: верни is_male=true, если из данных следует, что это мужчина (напр. «Пол: мужской», мужские местоимения/формы, «няня-мужчина», мужское имя). Если не уверен, верни false.\n\n"
+
         "Формат ответа — только этот JSON:\n"
         "{\n"
         '  "operational_fit": <число 0..10 с 1 знаком после запятой>,\n'
         '  "human_fit": <число 0..10 с 1 знаком после запятой>,\n'
         '  "authenticity": <число 0..1 с 2 знаками после запятой>,\n'
         '  "combined_fit": <число 0..10 с 1 знаком после запятой>,\n'
+        '  "is_male": <true|false>,\n'
         '  "reasons_operational": ["<=5 коротких буллетов с «цитатами»"],\n'
         '  "reasons_human": ["<=5 коротких буллетов с «цитатами»"],\n'
         '  "reasons_authenticity": ["2–4 буллета про конкретику/клише/баланс с «цитатами»"],\n'
@@ -166,7 +169,6 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         f"Факты профиля (JSON):\n{profile_summary}\n"
         f"Рекомендации (текст, если есть):\n{recs_text}\n\n"
     )
-
 
     try:
         client = make_openai_client()
@@ -185,6 +187,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         human_fit       = float(data.get("human_fit", 0.0))
         authenticity    = float(data.get("authenticity", 0.5))
         combined_fit    = float(data.get("combined_fit", 0.0)) or (0.6*operational_fit + 0.4*human_fit)
+        is_male         = bool(data.get("is_male", False))
 
         reasons_operational   = data.get("reasons_operational", []) or []
         reasons_human         = data.get("reasons_human", []) or []
@@ -262,7 +265,7 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
                 bullets.append(f"• {m}")
 
         bullets.append(f"Итоговая оценка: {final_score}")
-        return final_score, bullets
+        return final_score, bullets, is_male
 
 
     except Exception as e:
@@ -271,11 +274,11 @@ def score_with_chatgpt(jd_text: str, profile: dict) -> tuple[int, list[str]]:
         etype = getattr(e, "type", None)
         if code:
             print(f"[SCORER] API error ({code}): {msg}", file=sys.stderr)
-            return 0, [f"error ({code}): {msg}"]
+            return 0, [f"error ({code}): {msg}"], False
         elif etype:
             print(f"[SCORER] API error ({etype}): {msg}", file=sys.stderr)
-            return 0, [f"error ({etype}): {msg}"]
+            return 0, [f"error ({etype}): {msg}"], False
         else:
             print(f"[SCORER] API error: {msg}", file=sys.stderr)
-            return 0, [f"error: {msg}"]
+            return 0, [f"error: {msg}"], False
 

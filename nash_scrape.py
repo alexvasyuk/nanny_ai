@@ -150,9 +150,9 @@ def scrape_open_profile(
     }
 
     if no_openai:
-        score, reasons = 0, ["skipped (no-openai)"]
+        score, reasons, is_male = 0, ["skipped (no-openai)"], False
     else:
-        score, reasons = score_with_chatgpt(
+        score, reasons, is_male = score_with_chatgpt(
             jd_text,
             payload,
         )
@@ -174,6 +174,7 @@ def scrape_open_profile(
         "explanation_bullets": "\n".join(reasons) if reasons else "",
         "location": location,
         "travel_time_min": travel_time,
+        "is_male": is_male,
         "phone": phone_e164,
     }
 
@@ -257,6 +258,20 @@ def scrape_recent_on_current_serp(
             home_address=home_address,
             no_phones=no_phones,
         )
+
+        # Skip male nannies flagged by the model
+        if row.get("is_male"):
+            print(f"[SKIP-open] male (model): {row.get('name')!r} -> {c['url']}", flush=True)
+            if c.get("pid"):
+                seen_ids.add(c["pid"])
+            # Back to SERP for the next candidate
+            try:
+                page.go_back(wait_until="domcontentloaded")
+            except Exception:
+                page.goto(SERP_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(300)
+            continue
+
         # audit fields from the SERP card
         row["last_active_raw"] = c["last_active_raw"]
         row["last_active_at"]  = c["last_active_at"].isoformat() if c["last_active_at"] else None
