@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, List, Tuple, Optional
-
+from typing import Dict, List, Tuple, Optional, Any
+import re
 import gspread
 from gspread.cell import Cell
 from gspread_formatting import cellFormat, color, format_cell_range
@@ -54,6 +54,46 @@ MACHINE_UPDATE_COLS = [
     # "explanation_bullets",
 ]
 
+PID_FIELD = "profile_id"
+URL_FIELD = "profile_url"
+
+# === One-time sheet context cache (avoid re-opening/re-reading per page) ===
+_SHEETS_CTX: Dict[tuple[str, str], Dict[str, Any]] = {}
+
+def get_or_init_ctx(sa_json: str, spreadsheet_id: str) -> Dict[str, Any]:
+    key = (sa_json, spreadsheet_id)
+    ctx = _SHEETS_CTX.get(key)
+    if ctx:
+        return ctx
+    ws, header_map, id_to_row, existing_urls_by_id = load_existing_ids(sa_json, spreadsheet_id)
+    ctx = {
+        "ws": ws,
+        "header_map": header_map,
+        "id_to_row": id_to_row,
+        "existing_urls_by_id": existing_urls_by_id,
+    }
+    _SHEETS_CTX[key] = ctx
+    return ctx
+
+def canon_pid(x) -> str:
+    """
+    Return a canonical profile_id as a *string*.
+    - trims spaces
+    - keeps digits only (Nashanyanya ids are numeric)
+    """
+    s = str(x).strip()
+    s = re.sub(r"\D+", "", s)
+    return s
+
+def canon_url(u: str) -> str:
+    """Normalize profile_url so we don't treat trailing slashes/params as different."""
+    if not u:
+        return ""
+    from urllib.parse import urlsplit, urlunsplit
+    p = urlsplit(u)
+    path = p.path.rstrip("/")  # drop trailing slash
+    return urlunsplit((p.scheme, p.netloc, path, "", ""))  # strip query/frag
+
 def _col_letter(col_idx: int) -> str:
     # 1 -> "A", 27 -> "AA"
     return "".join(ch for ch in rowcol_to_a1(1, col_idx) if ch.isalpha())
@@ -103,6 +143,7 @@ def ensure_status_dropdown(ws):
         # Edit the list as you like – ordered roughly by funnel
         statuses = [
             "Новый",
+            "Не подходит",
             "Дубликат",
             "Не соответствует критериям",
             "Неверный номер",
@@ -252,25 +293,44 @@ def load_existing_ids(sa_json: str, spreadsheet_id: str):
     ensure_status_dropdown(ws)
     bold_columns_by_headers(ws, ["score"])  # adjust to your exact header text
 
-
-
-    id_col = header_map["profile_id"]
-    url_col = header_map.get("profile_url")
-
-    ids  = ws.col_values(id_col)                 # includes header at [0]
-    urls = ws.col_values(url_col) if url_col else []
-
+    # === FAST COLUMN READS: 1–2 API calls instead of per-row ===
     id_to_row: Dict[str, int] = {}
     existing_urls_by_id: Dict[str, str] = {}
 
-    for i, pid in enumerate(ids[1:], start=2):   # start row=2
+    pid_col = header_map.get("profile_id")
+    url_col = header_map.get("profile_url")
+
+    # Nothing to map if we don't have a profile_id column
+    if pid_col is None:
+        return ws, header_map, id_to_row, existing_urls_by_id
+
+    # Read entire columns once (each is a single API read). First element is header.
+    pid_values: List[str] = ws.col_values(pid_col) if pid_col else []
+    url_values: List[str] = ws.col_values(url_col) if url_col else []
+
+    # Drop header row (row 1)
+    if pid_values:
+        pid_values = pid_values[1:]
+    if url_values:
+        url_values = url_values[1:]
+
+    # Build maps. Spreadsheet row index starts at 2 here.
+    for i, pid_cell in enumerate(pid_values, start=2):
+        if not pid_cell:
+            continue
+        pid = canon_pid(pid_cell)
         if not pid:
             continue
-        id_to_row[pid] = i
-        if url_col and (i - 1) < len(urls):
-            u = urls[i - 1]
-            if u:
-                existing_urls_by_id[pid] = u
+
+        id_to_row[p_id] = i if (p_id := pid) else i  # keep exact row index
+
+        # Attach canonical URL if available at same offset
+        if url_values:
+            j = i - 2
+            if 0 <= j < len(url_values):
+                u = url_values[j] or ""
+                if u:
+                    existing_urls_by_id[p_id] = canon_url(u)
 
     return ws, header_map, id_to_row, existing_urls_by_id
 
@@ -349,17 +409,41 @@ def append_run_row(sa_json: str, spreadsheet_id: str, run_info: dict) -> None:
 
 # ------------------------- Coordinated UPSERT -------------------------
 
-def upsert_nannies(sa_json: str, spreadsheet_id: str, scraped_rows: List[dict], *, new_only: bool = False):
-    ws, header_map, id_to_row, existing_urls_by_id = load_existing_ids(sa_json, spreadsheet_id)
+def upsert_nannies(
+    sa_json: str,
+    spreadsheet_id: str,
+    scraped_rows: List[dict],
+    *,
+    new_only: bool = False,
+    ctx: Optional[dict] = None,   # <— NEW
+):
+    if ctx is None:
+        ws, header_map, id_to_row, existing_urls_by_id = load_existing_ids(sa_json, spreadsheet_id)
+    else:
+        ws = ctx["ws"]
+        header_map = ctx["header_map"]
+        id_to_row = ctx["id_to_row"]
+        existing_urls_by_id = ctx["existing_urls_by_id"]
 
     to_insert: List[dict] = []
     to_update_by_row: Dict[int, dict] = {}
     now_iso = dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
     for r in scraped_rows:
-        pid = str(r.get("profile_id") or "").strip()
+        # === INSIDE for r in scraped_rows: canonicalize first ===
+        pid_raw = r.get(PID_FIELD) or r.get("id") or r.get("profileId")
+        pid = canon_pid(pid_raw or "")
         if not pid:
-            continue
+            continue  # skip rows without a valid id
+
+        # normalize url -> profile_url
+        if r.get(URL_FIELD):
+            r[URL_FIELD] = canon_url(r[URL_FIELD])
+        elif r.get("url"):
+            r[URL_FIELD] = canon_url(r["url"])
+
+        # ensure we always store pid as *string*
+        r[PID_FIELD] = pid
 
         # normalize url -> profile_url
         r.setdefault("profile_url", r.get("url", ""))
@@ -378,20 +462,44 @@ def upsert_nannies(sa_json: str, spreadsheet_id: str, scraped_rows: List[dict], 
         if new_only:
             continue
 
-        row_idx = id_to_row[pid]
-        upd = {k: r.get(k) for k in set(MACHINE_UPDATE_COLS)}
-        upd["last_seen_at"] = now_iso
+        # === INSERT/UPDATE decision strictly by pid ===
+        row_idx = id_to_row.get(pid)
+        if row_idx is None:
+            # build minimal new row (respect your header_map)
+            to_insert.append(r)
+        else:
+            upd: Dict[str, Optional[str]] = {}
 
-        # backfill profile_url only if currently blank in sheet
-        if not existing_urls_by_id.get(pid) and r.get("profile_url"):
-            upd["profile_url"] = r["profile_url"]
+            # Update machine fields you expect to change
+            for k in MACHINE_UPDATE_COLS:
+                if k in r:
+                    upd[k] = r[k]
 
-        to_update_by_row[row_idx] = upd
+            # backfill/normalize profile_url only if blank in sheet or changed after canon
+            if r.get(URL_FIELD):
+                sheet_url = existing_urls_by_id.get(pid, "")
+                if not sheet_url or sheet_url != r[URL_FIELD]:
+                    upd[URL_FIELD] = r[URL_FIELD]
+
+            to_update_by_row[row_idx] = upd
 
     new_count = append_new_rows(ws, header_map, to_insert)
     upd_count = 0 if new_only else batch_update_machine_fields(ws, header_map, to_update_by_row)
     apply_column_colors(ws)
     # sort by score descending
     sort_by_header(ws, "score", desc=True)
+
+    # Keep in-memory maps in sync for this process (prevents re-adding within the run)
+    if ctx is not None:
+        for r in scraped_rows or []:
+            pid = canon_pid(r.get("profile_id") or "")
+            if not pid:
+                continue
+            if pid not in id_to_row:
+                id_to_row[pid] = id_to_row.get(pid, -1)
+            u = r.get("profile_url")
+            if u:
+                existing_urls_by_id[pid] = u
+
     return new_count, upd_count
 

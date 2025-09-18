@@ -11,7 +11,8 @@ from scorer import score_with_chatgpt
 from io_csv import append_row
 from datetime import datetime, timedelta
 import re
-from gsheets import upsert_nannies, append_run_row, load_existing_ids
+from gsheets import upsert_nannies, append_run_row, load_existing_ids, canon_url, canon_pid, get_or_init_ctx
+
 import os
 
 from extractors import (
@@ -118,6 +119,9 @@ def scrape_open_profile(
     # Current canonical URL:
     url_now = page.url
 
+    # Derive numeric profile_id from the URL (e.g., .../nyanya/moscow/608431)
+    profile_id = canon_pid(profile_id_from_url(url_now))
+
     if os.getenv("YAMAPS_DEBUG") == "1":
         print(f"[YAMAPS] yandex_tt={travel_time} for {url_now}", flush=True)  # one-line debug
 
@@ -131,7 +135,8 @@ def scrape_open_profile(
     location    = textify(location_raw)
 
     payload = {
-        "url": url_now,
+        "profile_id": profile_id,
+        "url": canon_url(url_now),
         "name": name,
         "age": age,
         "experience": experience,
@@ -156,9 +161,9 @@ def scrape_open_profile(
 
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "profile_id": profile_id_from_url(url_now),
+        "profile_id": profile_id,
         "url": url_now,
-        "profile_url": url_now,
+        "profile_url": canon_url(url_now),
         "name": name,
         "age": age,
         "experience_years": experience,
@@ -216,12 +221,12 @@ def scrape_recent_on_current_serp(
 
         if not (is_recent and url):
             continue
-            
-        if pid and pid in seen_ids:
+        pid_c = canon_pid(pid)
+        if pid_c and pid_c in seen_ids:    
             if sink is not None:
                 sink.append({
-                    "profile_id": pid,
-                    "profile_url": url,
+                    "profile_id": pid_c,
+                    "profile_url": canon_url(url),
                     "last_active_raw": raw,
                     "last_active_at": last_dt.isoformat() if last_dt else None,
                 })
@@ -256,9 +261,20 @@ def scrape_recent_on_current_serp(
         row["last_active_raw"] = c["last_active_raw"]
         row["last_active_at"]  = c["last_active_at"].isoformat() if c["last_active_at"] else None
 
+        # ensure strict identity on scraped rows
+        if c.get("pid"):
+            row["profile_id"] = canon_pid(c["pid"])
+        if row.get("profile_url"):
+            row["profile_url"] = canon_url(row["profile_url"])
+        elif c.get("url"):
+            row["profile_url"] = canon_url(c["url"])
+
         sink.append(row)
         if c["pid"]:
-            seen_ids.add(c["pid"])
+            try:
+                seen_ids.add(canon_pid(c["pid"]))
+            except Exception:
+                seen_ids.add(c["pid"])
         written += 1
         print(f"[OK] [{j}/{len(candidates)}] saved {row.get('name')!r} -> {row.get('url')}", flush=True)
 
@@ -282,25 +298,49 @@ def scrape_recent_across_pages(
     no_openai: bool = False,
     home_address: str = "",
     no_phones: bool = False,
+    sa_json: str = "",
+    sheet_id: str = "",
+    new_only: bool = False,
+    sheet_ctx: Optional[dict] = None,
 ) -> int:
     total_written = 0
     page_index = 1
     seen_ids = seen_ids or set()
-    rows_accum: list[dict] = []     
+    total_new = 0
+    total_upd = 0   
 
     while True:
         print(f"\n[PAGE {page_index}] --------", flush=True)
+        rows_page: list[dict] = []
         written_this_page = scrape_recent_on_current_serp(
             page, 
             jd_text, 
             cutoff_hours=cutoff_hours, 
             cap=cap_per_page, 
             seen_ids=seen_ids,
-            sink=rows_accum,
+            sink=rows_page,
             no_openai=no_openai,
             home_address=home_address,  
             no_phones=no_phones,
         )
+
+        # Per-page flush to Google Sheets
+        if rows_page:
+            try:
+                new_c, upd_c = upsert_nannies(
+                    sa_json=sa_json,
+                    spreadsheet_id=sheet_id,
+                    scraped_rows=rows_page,
+                    new_only=new_only,
+                    ctx=sheet_ctx,   # <— reuse, no re-reads
+                )
+            except Exception as e:
+                print(f"[SHEETS][Page {page_index}] upsert failed: {e}", flush=True)
+                new_c, upd_c = 0, 0
+            print(f"[SHEETS] Page {page_index} flushed: rows={len(rows_page)} inserted={new_c} updated={upd_c}", flush=True)
+            total_new += new_c
+            total_upd += upd_c
+
         total_written += written_this_page
 
         # Early stop: when nothing recent left, later pages are older (sorted by date ↓)
@@ -320,7 +360,7 @@ def scrape_recent_across_pages(
         page.wait_for_timeout(350)
         page_index += 1
 
-    return total_written, rows_accum
+    return total_written, total_new, total_upd
 
 
 
@@ -366,11 +406,12 @@ def main():
         print(f"[INFO] Opening SERP: {SERP_URL}")
         page.goto(SERP_URL, wait_until="domcontentloaded")
 
-        _, _, id_to_row, _ = load_existing_ids(args.sa_json, args.sheet_id)
-        known_ids = set(id_to_row.keys())
+        sheet_ctx = get_or_init_ctx(args.sa_json, args.sheet_id)
+        known_ids = set(sheet_ctx["id_to_row"].keys())
+
         print(f"[SHEETS] known profiles in sheet: {len(known_ids)}")
 
-        total_written, rows_accum = scrape_recent_across_pages(
+        total_written, new_count, upd_count = scrape_recent_across_pages(
             page,
             jd_text,
             cutoff_hours=args.since_hours,
@@ -380,17 +421,14 @@ def main():
             no_openai=args.no_openai, 
             home_address=args.home_address,
             no_phones=args.no_phones,
+            sa_json=args.sa_json,
+            sheet_id=args.sheet_id,
+            new_only=args.new_only,
+            sheet_ctx=sheet_ctx,
         )
         pages_scanned = "N/A" if args.max_pages is None else args.max_pages  # set a real count if you tracked it
 
-        # ---- UPSERT to Google Sheets ----
-        new_count, upd_count = upsert_nannies(
-            sa_json=args.sa_json,
-            spreadsheet_id=args.sheet_id,
-            scraped_rows=rows_accum,
-            new_only=args.new_only,
-        )
-        print(f"[SHEETS] inserted={new_count} updated={upd_count}")
+        print(f"[SHEETS] totals across pages -> inserted={new_count} updated={upd_count}")
 
         # ---- Audit (optional) ----
         run_info = {
@@ -398,7 +436,7 @@ def main():
             "serp_url": SERP_URL,
             "cutoff_hours": args.since_hours,
             "pages_scanned": pages_scanned,
-            "candidates_scanned": len(rows_accum),
+            "candidates_scanned": total_written,
             "new_inserted": new_count,
             "updated_existing": upd_count,
             "duration_sec": round(time.time() - t0, 1),
