@@ -84,6 +84,114 @@ STATUSES_ALLOWED = [
 # === One-time sheet context cache (avoid re-opening/re-reading per page) ===
 _SHEETS_CTX: Dict[tuple[str, str], Dict[str, Any]] = {}
 
+# === Phones scraping helpers ===================================================
+
+def pick_top_n_for_phone_scrape(ctx: Dict[str, Any], top_n: int, only_missing: bool = True) -> List[Dict[str, Any]]:
+    """
+    Return up to top_n rows from the sheet, in current order, with fields:
+    {row_idx, profile_id, profile_url, phone}. If only_missing=True, skip rows
+    where phone is already present/non-empty.
+    """
+    ws = ctx["ws"]
+    header_map = ctx["header_map"]
+
+    pid_col = header_map.get("profile_id")
+    url_col = header_map.get("profile_url")
+    phone_col = header_map.get("phone") or header_map.get("phone_e164") or header_map.get("Телефон")
+
+    if not url_col:
+        print("[PHONES] No 'profile_url' column found; nothing to do.")
+        return []
+
+    # Compute A1 ranges for the first N data rows (rows start at 2)
+    end_row = 1 + max(0, int(top_n)) + 1  # include header row in range math; data starts at row 2
+    url_letter = rowcol_to_a1(1, url_col)[:-1]
+    url_range = f"{url_letter}2:{url_letter}{end_row}"
+
+    ranges = [url_range]
+    pid_values = None
+    phone_values = None
+
+    if pid_col:
+        pid_letter = rowcol_to_a1(1, pid_col)[:-1]
+        pid_range = f"{pid_letter}2:{pid_letter}{end_row}"
+        ranges.append(pid_range)
+    if phone_col:
+        phone_letter = rowcol_to_a1(1, phone_col)[:-1]
+        phone_range = f"{phone_letter}2:{phone_letter}{end_row}"
+        ranges.append(phone_range)
+
+    batches = ws.batch_get(ranges)  # 1 API read
+    # batches order aligns with 'ranges'
+    url_values = batches[0] if len(batches) >= 1 else []
+    if pid_col and len(batches) >= 2:
+        pid_values = batches[1]
+    if phone_col and ((pid_col and len(batches) >= 3) or (not pid_col and len(batches) >= 2)):
+        phone_values = batches[-1]
+
+    # Normalize lists: each is a list of 1-element rows or empty
+    def value_at(lst, idx):
+        if not lst or idx >= len(lst):
+            return ""
+        row = lst[idx] or []
+        return (row[0] if row else "").strip()
+
+    out: List[Dict[str, Any]] = []
+    for i in range(max(len(url_values), top_n)):
+        if i >= top_n:
+            break
+        row_idx = 2 + i  # sheet row (header is row 1)
+        url = value_at(url_values, i)
+        if not url:
+            continue
+        pid = value_at(pid_values, i) if pid_values is not None else ""
+        phone = value_at(phone_values, i) if phone_values is not None else ""
+
+        if only_missing and phone:
+            continue
+
+        out.append({
+            "row_idx": row_idx,
+            "profile_id": canon_pid(pid) if pid else "",
+            "profile_url": canon_url(url),
+            "phone": phone,
+        })
+
+    return out
+
+
+def batch_update_phones(ctx: Dict[str, Any], updates: List[Dict[str, Any]]) -> int:
+    """
+    updates: list of {row_idx, phone}
+    Writes phones into the 'phone' column (or 'phone_e164' / 'Телефон' fallback) in a single batch.
+    Returns number of rows updated.
+    """
+    if not updates:
+        return 0
+
+    ws = ctx["ws"]
+    header_map = ctx["header_map"]
+    phone_col = header_map.get("phone") or header_map.get("phone_e164") or header_map.get("Телефон")
+    if not phone_col:
+        print("[PHONES] No 'phone' column found; cannot update.")
+        return 0
+
+    phone_letter = rowcol_to_a1(1, phone_col)[:-1]
+
+    data = []
+    for u in updates:
+        r = int(u["row_idx"])
+        v = (u.get("phone") or "").strip()
+        data.append({
+            "range": f"{phone_letter}{r}",
+            "values": [[v]],
+        })
+
+    # Batch write
+    ws.batch_update(data)
+    return len(updates)
+
+
 def get_or_init_ctx(sa_json: str, spreadsheet_id: str) -> Dict[str, Any]:
     key = (sa_json, spreadsheet_id)
     ctx = _SHEETS_CTX.get(key)

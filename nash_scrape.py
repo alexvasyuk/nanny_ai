@@ -11,7 +11,16 @@ from scorer import score_with_chatgpt
 from io_csv import append_row
 from datetime import datetime, timedelta
 import re
-from gsheets import upsert_nannies, append_run_row, load_existing_ids, canon_url, canon_pid, get_or_init_ctx
+from gsheets import (
+    upsert_nannies,
+    append_run_row,
+    load_existing_ids,
+    canon_url,
+    canon_pid,
+    get_or_init_ctx,           
+    pick_top_n_for_phone_scrape,  
+    batch_update_phones,          
+)
 
 import os
 
@@ -47,6 +56,52 @@ OUTPUT_CSV = Path("data/nannies.csv")
 JD_PATH = Path("data/jd.txt")
 
 _ID_RE = re.compile(r"/nyanya/[^/]+/(?P<id>\d+)(?:/|$)")
+
+def fetch_phones_for_sheet_rows(page, sheet_ctx: dict, targets: list[dict], *, pause_ms: int = 400) -> int:
+    """
+    For each target {row_idx, profile_url}, open the profile and extract phone, then batch update.
+    Returns number of rows updated.
+    """
+    updates = []
+    for t in targets:
+        url = t.get("profile_url") or ""
+        row_idx = t.get("row_idx")
+        if not url or not row_idx:
+            continue
+
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+        except Exception:
+            # One retry to recover session
+            try:
+                page.goto(url, wait_until="load")
+            except Exception as e:
+                print(f"[PHONES] navigation failed for row {row_idx}: {e}", flush=True)
+                continue
+
+        page.wait_for_timeout(250)
+
+        try:
+            phone_e164 = extract_phone_number(page) or ""
+        except Exception as e:
+            print(f"[PHONES] extract failed row {row_idx}: {e}", flush=True)
+            phone_e164 = ""
+
+        if phone_e164:
+            updates.append({"row_idx": row_idx, "phone": phone_e164})
+            print(f"[PHONES] {row_idx}: {phone_e164}", flush=True)
+
+        if pause_ms:
+            page.wait_for_timeout(pause_ms)
+
+    # Batch update to Sheets
+    if updates:
+        count = batch_update_phones(sheet_ctx, updates)
+        print(f"[PHONES] batch updated {count} rows", flush=True)
+        return count
+    print("[PHONES] no phones to update", flush=True)
+    return 0
+
 
 def profile_id_from_url(u: str) -> str:
     """Return numeric profile id from any /nyanya/<city>/<id> URL."""
@@ -401,6 +456,17 @@ def main():
         action="store_true",
         help="Skip clicking the 'Телефон' button and do not scrape phone numbers."
     )
+    parser.add_argument(
+        "--phones-top-n",
+        type=int,
+        default=0,
+        help="If >0, skip scraping new profiles and only fetch phone numbers for the top N rows in the sheet.",
+    )
+    parser.add_argument(
+        "--phones-overwrite",
+        action="store_true",
+        help="If set, fetch phone even if phone cell is already filled (default: only rows where phone is empty).",
+    )
     args = parser.parse_args()
 
     if not STORAGE_STATE_PATH.exists():
@@ -417,6 +483,32 @@ def main():
         browser = p.chromium.launch(headless=False)
         context = browser.new_context(storage_state=str(STORAGE_STATE_PATH))
         page = context.new_page()
+
+        # === PHONE-ONLY MODE ===========================================================
+        if args.phones_top_n and args.phones_top_n > 0:
+            sheet_ctx = get_or_init_ctx(args.sa_json, args.sheet_id)
+            only_missing = not bool(args.phones_overwrite)
+            targets = pick_top_n_for_phone_scrape(sheet_ctx, top_n=args.phones_top_n, only_missing=only_missing)
+            print(f"[PHONES] selected {len(targets)} top rows for phone scrape (top_n={args.phones_top_n}, only_missing={only_missing})", flush=True)
+            updated = fetch_phones_for_sheet_rows(page, sheet_ctx, targets)
+            # Optionally append a Runs line
+            try:
+                run_info = {
+                    "run_id_iso": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "serp_url": "-",  # not used in this mode
+                    "cutoff_hours": None,
+                    "pages_scanned": 0,
+                    "candidates_scanned": 0,
+                    "new_inserted": 0,
+                    "updated_existing": updated,
+                    "duration_sec": round(time.time() - t0, 1),
+                }
+                append_run_row(args.sa_json, args.sheet_id, run_info)
+            except Exception as e:
+                print(f"[WARN] could not append Runs row (phones-only): {e}")
+
+            return  # stop; we ran the phone-only operation
+        # ===========================================================================
 
         print(f"[INFO] Opening SERP: {SERP_URL}")
         page.goto(SERP_URL, wait_until="domcontentloaded")
