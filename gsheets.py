@@ -7,6 +7,7 @@ import re
 import gspread
 from gspread.cell import Cell
 from gspread_formatting import cellFormat, color, format_cell_range
+from gspread_formatting import DataValidationRule, BooleanCondition, set_data_validation_for_cell_range
 from gspread.utils import rowcol_to_a1
 
 # ------------------------- Sheet & headers -------------------------
@@ -56,6 +57,29 @@ MACHINE_UPDATE_COLS = [
 
 PID_FIELD = "profile_id"
 URL_FIELD = "profile_url"
+
+# Full set of allowed statuses (canonical, ordered)
+STATUSES_ALLOWED = [
+    "Новый",
+    "Не подходит",                         # <— added
+    "Дубликат",
+    "Не соответствует критериям",
+    "Неверный номер",
+    "Не отвечает",
+    "Оставлено сообщение",
+    "Не заинтересован(а)",
+    "Заинтересован(а) / ждёт скрининг",
+    "Скрининг назначен",
+    "Скрининг пройден ✅ успешно",
+    "Скрининг пройден ❌ отказ",
+    "Передано Саше/Вике",
+    "У Саши/Вики интервью назначено",
+    "У Саши/Вики интервью проведено ✅ успешно",
+    "У Саши/Вики интервью проведено ❌ отказ",
+    "Сделано предложение",
+    "Нанят(а)",
+    "В ожидании",
+]
 
 # === One-time sheet context cache (avoid re-opening/re-reading per page) ===
 _SHEETS_CTX: Dict[tuple[str, str], Dict[str, Any]] = {}
@@ -131,37 +155,10 @@ def bold_columns_by_headers(ws, header_names: list[str] = None):
             ws.format(f"{col_letter}:{col_letter}", {"textFormat": {"bold": True}})
 
 def ensure_status_dropdown(ws):
-    """
-    Add/refresh a data-validation dropdown on the 'status' column.
-    Applies to all existing rows (row 2 .. last row).
-    """
     try:
         sheet_id = getattr(ws, "id", None) or ws._properties["sheetId"]
         grid = ws._properties.get("gridProperties", {})
         row_count = grid.get("rowCount", 5000)  # fallback if not present
-
-        # Edit the list as you like – ordered roughly by funnel
-        statuses = [
-            "Новый",
-            "Не подходит",
-            "Дубликат",
-            "Не соответствует критериям",
-            "Неверный номер",
-            "Не отвечает",
-            "Оставлено сообщение",
-            "Не заинтересован(а)",
-            "Заинтересован(а) – ждет скрининг",
-            "Скрининг назначен",
-            "Скрининг пройден – успешно",
-            "Скрининг пройден – отказ",
-            "Передано Саше/Вике",
-            "У Саши/Вики – интервью назначено",
-            "У Саши/Вики – интервью проведено – успешно",
-            "У Саши/Вики – интервью проведено – отказ",
-            "Сделано предложение",
-            "Нанят(а)",
-            "В ожидании",
-        ]
 
         # Which column to target
         col_idx0 = NANNIES_HEADERS.index("status")  # zero-based
@@ -177,7 +174,7 @@ def ensure_status_dropdown(ws):
                 "rule": {
                     "condition": {
                         "type": "ONE_OF_LIST",
-                        "values": [{"userEnteredValue": s} for s in statuses],
+                        "values": [{"userEnteredValue": s} for s in STATUSES_ALLOWED],
                     },
                     "inputMessage": "Select a status",
                     "strict": True,       # disallow values outside the list
