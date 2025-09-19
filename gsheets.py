@@ -51,8 +51,8 @@ MACHINE_UPDATE_COLS = [
     "last_seen_at",
     "profile_url",  
     # optionally keep score fresh—include the two below if you want that
-    # "score",
-    # "explanation_bullets",
+    "score",
+    "explanation_bullets",
 ]
 
 PID_FIELD = "profile_id"
