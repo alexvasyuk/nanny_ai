@@ -823,58 +823,89 @@ def extract_recommendations_from_profile(page, timeout: int = 1200):
 
 def extract_has_audio_from_profile(page, timeout: int = 4000) -> bool:
     """
-    Returns True if the profile has an audio message block/player, else False.
-    Short-circuits quickly when absent to avoid multi-second stalls.
+    True if the profile has an audio message block/player, else False.
+    Robust against lazy mounting and hidden <audio> elements.
+    Avoids mixing selector engines (CSS vs text=).
     """
-    # Cap the real wait to a small value; keep signature intact for callers
-    t = min(600, timeout)
+    # keep waits small to avoid stalls
+    t = min(700, timeout)
 
-    # One combined locator instead of 6 sequential waits
-    sel = (
-        "div.block.block_audio, "
-        "text=Аудио-обращение, "
-        "nn-audio-message, "
-        "nn-audio-player, "
-        "audio[src*='audio.nashanyanya.ru'], "
-        "audio[src$='.mp3']"
-    )
+    # 1) Any known wrapper/component (CSS only)
     try:
-        loc = page.locator(sel).first
-        # is_visible() returns fast; we also accept attached nodes as a positive
-        if loc.is_visible(timeout=t):
+        wrapper = page.locator("div.block.block_audio, nn-audio-message, nn-audio-player").first
+        if wrapper.is_visible(timeout=t):
             return True
-        # If not visible, accept attached (lazy component still mounting)
-        loc.wait_for(state="attached", timeout=t)
+        # accept attached (component mounted but not yet painted/in-viewport)
+        wrapper.wait_for(state="attached", timeout=t)
         return True
     except PlaywrightTimeoutError:
-        return False
+        pass
+
+    # 2) Title text check (use text engine separately — NOT in the comma list)
+    try:
+        if page.get_by_text("Аудио-обращение").first.is_visible(timeout=t):
+            return True
+    except PlaywrightTimeoutError:
+        pass
+
+    # 3) Nudge scroll once to trigger lazy mount, then look for raw <audio>
+    try:
+        page.evaluate("""
+            () => {
+              const el = document.querySelector('.block.block_audio')
+                   || document.querySelector('nn-audio-message')
+                   || document.querySelector('nn-audio-player');
+              if (el) el.scrollIntoView({behavior: 'instant', block: 'center'});
+              else window.scrollBy(0, Math.min(1200, document.body.scrollHeight));
+            }
+        """)
     except Exception:
+        pass
+
+    try:
+        # don't require visible; many players keep <audio> hidden
+        audio = page.locator("audio[src*='audio.nashanyanya.ru'], audio[src$='.mp3']").first
+        audio.wait_for(state="attached", timeout=t)
+        return True
+    except PlaywrightTimeoutError:
         return False
 
 
 def extract_has_fairy_tale_audio(page, timeout: int = 4000) -> bool:
     """
-    Detects whether the profile has 'Записанные сказки' with an audio player.
-    Short-circuits quickly when absent.
+    True if the profile has 'Записанные сказки' with an audio player.
     """
-    t = min(600, timeout)
+    t = min(700, timeout)
 
-    # Primary: the tales block itself
     try:
         blk = page.locator(
             "nn-voice-acting-tales, "
             "div.block:has(.block__title:has-text('Записанные сказки'))"
         ).first
         if blk.is_visible(timeout=t):
-            # confirm an audio player is inside; keep this quick too
-            return blk.locator("audio, nn-audio-player").first.is_visible(timeout=t)
+            # accept attached audio inside block
+            blk.locator("audio, nn-audio-player").first.wait_for(state="attached", timeout=t)
+            return True
+        blk.wait_for(state="attached", timeout=t)
+        return True
+    except PlaywrightTimeoutError:
+        pass
+
+    try:
+        page.evaluate("""
+            () => {
+              const el = document.querySelector('nn-voice-acting-tales')
+                   || document.querySelector("div.block:has(.block__title:has-text('Записанные сказки'))");
+              if (el) el.scrollIntoView({behavior: 'instant', block: 'center'});
+              else window.scrollBy(0, Math.min(1200, document.body.scrollHeight));
+            }
+        """)
     except Exception:
         pass
 
-    # Fallback: any tales-hosted audio in the DOM
     try:
-        return page.locator(
-            "nn-voice-acting-tales audio[src*='audio.nashanyanya.ru']"
-        ).first.is_visible(timeout=t)
-    except Exception:
+        node = page.locator("nn-voice-acting-tales audio[src*='audio.nashanyanya.ru']").first
+        node.wait_for(state="attached", timeout=t)
+        return True
+    except PlaywrightTimeoutError:
         return False

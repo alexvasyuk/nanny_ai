@@ -231,6 +231,8 @@ def scrape_open_profile(
         "travel_time_min": travel_time,
         "is_male": is_male,
         "phone": phone_e164,
+        "has_audio": has_audio,
+        "has_fairy_tale_audio": has_fairy_tale_audio,
     }
 
 def scrape_recent_on_current_serp(

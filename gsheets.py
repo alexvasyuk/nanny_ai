@@ -28,8 +28,11 @@ MACHINE_NANNIES_HEADERS: List[str] = [
     "about",
     "education",
     "recommendations",
+    "has_audio",
+    "has_fairy_tale_audio",
     "score",
     "explanation_bullets",
+    # timing/meta fields
     "last_active_raw",
     "last_active_at",
     "first_seen_at",
@@ -53,6 +56,8 @@ MACHINE_UPDATE_COLS = [
     # optionally keep score fresh—include the two below if you want that
     "score",
     "explanation_bullets",
+    # "has_audio",
+    # "has_fairy_tale_audio",
 ]
 
 PID_FIELD = "profile_id"
