@@ -575,7 +575,7 @@ def _normalize_home_address(addr: str) -> str:
     return s
 
 
-def extract_travel_time_via_yandex(page, home_address: str = "", timeout: int = 20000) -> Optional[int]:
+def extract_travel_time_via_yandex(page, home_address: str = "", timeout: int = 9000) -> Optional[int]:
     """
     Open the Yandex route in a new tab, force public transport (rtt=mt),
     route FROM nanny coords TO your home_address, read first route duration.
@@ -627,38 +627,57 @@ def extract_travel_time_via_yandex(page, home_address: str = "", timeout: int = 
         new_url = urlunparse(u._replace(query=urlencode(q, doseq=True)))
         if dbg: print(f"[YAMAPS] URL => {new_url}", flush=True)
 
-        # 4) Open and wait for PT results to render
+        # 4) Open and wait for PT results to render (short, bounded waits)
         tab = page.context.new_page()
-        tab.goto(new_url, wait_until="domcontentloaded", timeout=timeout)
+        try:
+            tab.goto(new_url, wait_until="domcontentloaded", timeout=timeout)
+        except Exception as e:
+            if dbg: print(f"[YAMAPS] goto failed: {e}", flush=True)
+            try: tab.close()
+            except Exception: pass
+            return None
+
         try:
             tab.wait_for_selector(
                 '[class*="masstransit-route-snippet-view__route-duration"], '
                 '[class*="route-snippet-view__route-duration"]',
-                timeout=12000,
+                timeout=min(6000, timeout),
             )
         except Exception:
+            # don’t block if the snippet is slow; we’ll try body fallback
             pass
-        tab.wait_for_timeout(1500)
 
-        # 5) Parse duration
+        # 5) Parse duration (no fixed sleeps)
         mins = None
         try:
             sel = (
                 '[class*="masstransit-route-snippet-view__route-duration"], '
                 '[class*="route-snippet-view__route-duration"]'
             )
-            txt = tab.locator(sel).first.inner_text(timeout=3000)
+            txt = tab.locator(sel).first.inner_text(timeout=2000)
             mins = parse_ru_duration_to_min(txt)
             if dbg: print(f"[YAMAPS] snippet text: {txt} -> {mins} min", flush=True)
         except Exception as e:
             if dbg: print(f"[YAMAPS] snippet parse failed: {e}", flush=True)
 
         if mins is None:
-            body = tab.locator("body").inner_text()
-            mins = parse_ru_duration_to_min(body)
-            if dbg: print(f"[YAMAPS] body fallback -> {mins} min", flush=True)
+            try:
+                body = tab.locator("body").inner_text(timeout=2000)
+                mins = parse_ru_duration_to_min(body)
+                if dbg: print(f"[YAMAPS] body fallback -> {mins} min", flush=True)
+            except Exception:
+                pass
 
-        tab.close()
+        # 6) Close maps and deterministically re-sync on the profile page
+        try:
+            tab.close()
+        finally:
+            try:
+                page.bring_to_front()
+                page.locator("text=НАПИСАТЬ, a[href^='tel:']").first.wait_for(timeout=1200)
+            except Exception:
+                pass
+
         return mins
     except Exception as e:
         if dbg: print(f"[YAMAPS] error: {e}", flush=True)
@@ -728,7 +747,7 @@ def _clean_para(s: str) -> str:
     s = "\n".join([ln for ln in lines if ln])
     return s.strip()
 
-def extract_about_from_profile(page, timeout=6000) -> Optional[str]:
+def extract_about_from_profile(page, timeout=2500) -> Optional[str]:
     """
     Extract 'О себе' from profile page.
     """
@@ -745,7 +764,7 @@ def extract_about_from_profile(page, timeout=6000) -> Optional[str]:
     return about_text or None
 
 
-def extract_education_from_profile(page, timeout: int = 6000) -> str:
+def extract_education_from_profile(page, timeout: int = 2500) -> str:
     """
     Returns the 'Образование' block as a single cleaned string.
     Falls back to locating the block by its header text.
@@ -805,53 +824,57 @@ def extract_recommendations_from_profile(page, timeout: int = 1200):
 def extract_has_audio_from_profile(page, timeout: int = 4000) -> bool:
     """
     Returns True if the profile has an audio message block/player, else False.
-    Works even if Angular-generated ids/classes vary.
+    Short-circuits quickly when absent to avoid multi-second stalls.
     """
-    candidate_selectors = [
-        "div.block.block_audio",                    # wrapper block
-        "text=Аудио-обращение",                     # header text
-        "nn-audio-message",                         # component tag
-        "nn-audio-player",                          # player wrapper
-        "audio[src*='audio.nashanyanya.ru']",       # concrete audio host
-        "audio[src$='.mp3']"                        # fallback: any mp3
-    ]
+    # Cap the real wait to a small value; keep signature intact for callers
+    t = min(600, timeout)
 
-    for sel in candidate_selectors:
-        try:
-            node = page.locator(sel).first
-            node.wait_for(state="visible", timeout=timeout)
+    # One combined locator instead of 6 sequential waits
+    sel = (
+        "div.block.block_audio, "
+        "text=Аудио-обращение, "
+        "nn-audio-message, "
+        "nn-audio-player, "
+        "audio[src*='audio.nashanyanya.ru'], "
+        "audio[src$='.mp3']"
+    )
+    try:
+        loc = page.locator(sel).first
+        # is_visible() returns fast; we also accept attached nodes as a positive
+        if loc.is_visible(timeout=t):
             return True
-        except PlaywrightTimeoutError:
-            continue
+        # If not visible, accept attached (lazy component still mounting)
+        loc.wait_for(state="attached", timeout=t)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+    except Exception:
+        return False
 
-    return False
 
 def extract_has_fairy_tale_audio(page, timeout: int = 4000) -> bool:
     """
     Detects whether the profile has 'Записанные сказки' with an audio player.
-    Returns True/False.
+    Short-circuits quickly when absent.
     """
-    # Primary: dedicated component/block
-    candidates = [
-        "nn-voice-acting-tales",                                  # component wrapper
-        "div.block:has(.block__title:has-text('Записанные сказки'))",  # block by header
-    ]
-    for sel in candidates:
-        try:
-            blk = page.locator(sel).first
-            blk.wait_for(state="visible", timeout=timeout)
-            # confirm there is an audio player inside this block
-            if blk.locator("audio, nn-audio-player").first.is_visible():
-                return True
-        except PlaywrightTimeoutError:
-            continue
+    t = min(600, timeout)
 
-    # Fallback: any audio hosted in 'audio.nashanyanya.ru' inside a tales section
+    # Primary: the tales block itself
     try:
-        node = page.locator("nn-voice-acting-tales audio[src*='audio.nashanyanya.ru']").first
-        node.wait_for(state="visible", timeout=timeout)
-        return True
-    except PlaywrightTimeoutError:
+        blk = page.locator(
+            "nn-voice-acting-tales, "
+            "div.block:has(.block__title:has-text('Записанные сказки'))"
+        ).first
+        if blk.is_visible(timeout=t):
+            # confirm an audio player is inside; keep this quick too
+            return blk.locator("audio, nn-audio-player").first.is_visible(timeout=t)
+    except Exception:
         pass
 
-    return False
+    # Fallback: any tales-hosted audio in the DOM
+    try:
+        return page.locator(
+            "nn-voice-acting-tales audio[src*='audio.nashanyanya.ru']"
+        ).first.is_visible(timeout=t)
+    except Exception:
+        return False
