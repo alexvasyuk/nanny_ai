@@ -1,0 +1,14 @@
+# local config
+.env
+.env.*        # ignore .env.local, etc.
+
+# files
+commands.txt
+
+# folders
+secrets/
+data/
+
+.venv/
+venv/
+node_modules/
