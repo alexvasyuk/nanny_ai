@@ -469,6 +469,11 @@ def main():
         action="store_true",
         help="If set, fetch phone even if phone cell is already filled (default: only rows where phone is empty).",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="If set, run chromium headless",
+    )
     args = parser.parse_args()
 
     if not STORAGE_STATE_PATH.exists():
@@ -482,7 +487,7 @@ def main():
     jd_text = JD_PATH.read_text(encoding="utf-8").strip()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=bool(args.headless))
         context = browser.new_context(storage_state=str(STORAGE_STATE_PATH))
         page = context.new_page()
 
