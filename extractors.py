@@ -37,6 +37,9 @@ _RE_TIME = re.compile(r"(?P<h>\d{1,2}):(?P<m>\d{2})")
 # --- SERP card → absolute URL -------------------------------------------------
 BASE = "https://nashanyanya.ru"
 
+CARD_SELECTOR = "nn-nanny-resume-card:visible, div.nn-nanny-resume-card:visible"
+
+_ID_RE = re.compile(r"/nyanya/[^/]+/(?P<id>\d+)(?:/|$)")
 
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -356,10 +359,6 @@ def extract_last_active_from_card(card, timeout: int = 1200) -> Tuple[Optional[s
     parsed = parse_last_active_ru(raw) if raw else None
     return raw, parsed
 
-
-# Root selector(s) for SERP cards (both custom tag and class fallback)
-CARD_SELECTOR = "nn-nanny-resume-card:visible"
-
 def get_serp_cards(page: Page, timeout: int = 15000) -> Locator:
     """
     Return a locator for ALL nanny cards on the current SERP.
@@ -368,52 +367,92 @@ def get_serp_cards(page: Page, timeout: int = 15000) -> Locator:
     cards.first.wait_for(state="visible", timeout=timeout)
     return cards
 
-def go_to_next_serp_page(page: Page, timeout: int = 10000) -> bool:
-    """
-    Click the 'Next' paginator button and wait until the SERP actually changes.
-    Returns True if navigation succeeded, False if there is no next page or it didn't change.
+def _serp_fingerprint(page: Page) -> str:
+    """Top 3 + bottom 3 profile IDs to detect SERP changes."""
+    hrefs = page.locator(
+        "nn-nanny-resume-card a[href^='/nyanya/'], "
+        "div.nn-nanny-resume-card a[href^='/nyanya/']"
+    ).evaluate_all("els => els.map(e => e.getAttribute('href'))")
+    ids = []
+    for h in hrefs or []:
+        m = _ID_RE.search(h or "")
+        if m:
+            ids.append(m.group("id"))
+    if not ids:
+        return ""
+    head = ids[:3]
+    tail = ids[-3:] if len(ids) > 3 else ids
+    return "|".join(head + tail)
 
-    We detect change by watching the primary URL of the first card.
+def go_to_next_serp_page(page: Page, timeout_ms: int = 12000) -> bool:
     """
-    # Snapshot the first card's URL to detect change
-    try:
-        cards = get_serp_cards(page)
-        before_url = card_primary_url(cards.first)
-    except Exception:
-        before_url = ""
+    Click the 'Next' paginator on nashanyanya.ru reliably.
+    Returns True if SERP changed, otherwise False.
+    """
+    before_fp = _serp_fingerprint(page)
 
-    # Find the Next button (enabled)
-    next_btn = page.locator("button.pagination__nav_next").first
+    # Bring the paginator block into view first (this fixes "outside of viewport").
+    paginator = page.locator("nn-paginator").last
+    if paginator.count() == 0:
+        print("[DEBUG] paginator not found (nn-paginator).", flush=True)
+        return False
+
+    # Hard scroll to bottom, then center the paginator in the viewport.
+    page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+    paginator.scroll_into_view_if_needed()
+    page.wait_for_timeout(150)
+
+    # Select the Next nav button inside the paginator (bottom one).
+    next_btn = paginator.locator(":is(button,a).pagination__nav_next").last
     if next_btn.count() == 0:
-        return False
-    try:
-        # Some Angular Material buttons can be disabled via attribute/aria
-        if next_btn.get_attribute("disabled") is not None:
-            return False
-        aria = (next_btn.get_attribute("aria-disabled") or "").lower()
-        if aria in ("true", "1"):
-            return False
-    except Exception:
-        pass
-
-    try:
-        next_btn.scroll_into_view_if_needed()
-        next_btn.click()
-    except Exception:
+        print("[DEBUG] Next not found with :is(button,a).pagination__nav_next inside nn-paginator.", flush=True)
         return False
 
-    # Wait until the first card changes (SPA pagination)
-    deadline = time.time() + timeout / 1000.0
-    while time.time() < deadline:
+    # If site marks it disabled via attributes/classes, bail early.
+    cls = (next_btn.get_attribute("class") or "").lower()
+    aria = (next_btn.get_attribute("aria-disabled") or "").lower()
+    if "disabled" in cls or aria in ("true", "1") or next_btn.get_attribute("disabled") is not None:
+        print(f"[DEBUG] Next appears disabled (class={cls!r} aria={aria!r}).", flush=True)
+        return False
+
+    # Try normal click.
+    try:
+        next_btn.click(timeout=3000)
+    except Exception as e1:
+        # Try force click (bypasses actionability like "outside viewport/overlap").
         try:
-            cur_cards = get_serp_cards(page, timeout=5000)
-            after_url = card_primary_url(cur_cards.first)
-            if after_url and after_url != before_url:
-                return True
-        except Exception:
-            pass
+            next_btn.click(timeout=2500, force=True)
+        except Exception as e2:
+            # Try clicking via JS directly on the element.
+            try:
+                next_btn.evaluate("el => el.click()")
+            except Exception as e3:
+                # Last resort: click by coordinates.
+                try:
+                    next_btn.evaluate("el => el.scrollIntoView({block:'center', inline:'center'})")
+                    page.wait_for_timeout(150)
+                    handle = next_btn.element_handle()
+                    box = handle.bounding_box() if handle else None
+                    if not box:
+                        print(f"[DEBUG] bounding_box() is None; cannot mouse.click. e1={e1}", flush=True)
+                        return False
+                    page.mouse.click(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
+                except Exception as e4:
+                    print(f"[DEBUG] Next click failed. e1={e1} e2={e2} e3={e3} e4={e4}", flush=True)
+                    return False
+
+    # Wait for SERP to actually change.
+    deadline = time.time() + (timeout_ms / 1000.0)
+    last_fp = ""
+    while time.time() < deadline:
+        cur_fp = _serp_fingerprint(page)
+        if cur_fp and cur_fp != before_fp:
+            return True
+        if cur_fp != last_fp:
+            last_fp = cur_fp  # progress hint for yourself if you want to print
         page.wait_for_timeout(200)
 
+    print(f"[DEBUG] Pagination click did not change fingerprint (before={before_fp} after={last_fp}).", flush=True)
     return False
 
 def open_profile_from_card(page: Page, card: Locator, timeout: int = 15000) -> None:

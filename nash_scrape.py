@@ -424,7 +424,7 @@ def scrape_recent_across_pages(
             print(f"[INFO] Reached max_pages={max_pages}.", flush=True)
             break
 
-        moved = go_to_next_serp_page(page, timeout=12000)
+        moved = go_to_next_serp_page(page, timeout_ms=12000)
         if not moved:
             print("[INFO] No (enabled) Next or page didn't change. Done.", flush=True)
             break
