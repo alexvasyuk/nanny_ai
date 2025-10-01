@@ -37,11 +37,9 @@ def _apply_penalties_with_details(
     cap_to_3 = False
     if age is not None:
         if age < 45:
-            add(+1, "Возраст < 45: +1")
-        elif 55 <= age <= 64:
-            add(-1, "Возраст 55–64: -1")
+            add(-1, "Возраст < 45: -1")
         elif age >= 65:
-            add(-2, "Возраст ≥ 65: -2 (потолок 3)")
+            add(-1, "Возраст ≥ 65: -1 (потолок 3)")
             cap_to_3 = True
 
     # Travel time
